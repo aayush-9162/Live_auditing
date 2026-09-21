@@ -154,13 +154,22 @@ function bagsEqual(a, b) {
   return true;
 }
 
-function diffItems(jsonItems, mssqlItems, out) {
+function diffItems(jsonItems, mssqlItems, out, link = null) {
   if ((!jsonItems || jsonItems.length === 0) && (!mssqlItems || mssqlItems.length === 0)) return;
+
+  const skipJson  = (link && link.jsonConsumed)  || new Set();
+  const skipMssql = (link && link.mssqlConsumed) || new Set();
 
   const jMap = new Map();
   const mMap = new Map();
-  for (const it of jsonItems || []) jMap.set(itemKey(it), it);
-  for (const it of mssqlItems || []) mMap.set(itemKey(it), it);
+  for (const it of jsonItems || []) {
+    const k = itemKey(it);
+    if (!skipJson.has(k)) jMap.set(k, it);
+  }
+  for (const it of mssqlItems || []) {
+    const k = itemKey(it);
+    if (!skipMssql.has(k)) mMap.set(k, it);
+  }
 
   const seen = new Set();
   for (const [k, j] of jMap) {
@@ -210,9 +219,78 @@ function itemLabel(it) {
 // The two sides name packages differently ("bedroom" vs "*PKG1253243"), so
 // pair them by how many member items they share, falling back to an equal
 // price when membership is unknown.
-function diffPackages(jsonPackages, mssqlPackages, out) {
-  const a = jsonPackages || [];
-  const b = mssqlPackages || [];
+// A package's item id, without the "*PKG" marker the RV parser adds.
+function packageBareId(key) {
+  return normalizeItemId(String(key || '').replace(/^\*PKG/i, ''));
+}
+
+// Tickets book a package one of two ways:
+//
+//   (a) one line per component, each priced at 0, with the package total held
+//       separately in packageSummary; or
+//   (b) a single line whose item id IS the package, priced at the package
+//       total, with the components not listed at all.
+//
+// RV always prints both: a roll-up row plus every component. Style (b) would
+// therefore look like five mismatches — a package and three items "missing"
+// from the Ticket, and the Ticket's package line "missing" from RV — when in
+// fact the two sides agree.
+//
+// Pair them up here: when a Ticket line's item id matches an RV package, that
+// line represents the whole package. Compare it against the package total and
+// mark both sides' rows as accounted for so the item diff leaves them alone.
+function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
+  const link = { matchedRvPackages: new Set(), jsonConsumed: new Set(), mssqlConsumed: new Set() };
+  const jsonItems = jsonInvoice.items || [];
+  const mssqlItems = mssqlRecord.items || [];
+
+  for (const pkg of mssqlRecord.packages || []) {
+    const bare = packageBareId(pkg.key);
+    if (!bare) continue;
+    const line = jsonItems.find((it) => normalizeItemId(it.itemId) === bare);
+    if (!line) continue;                       // style (a), or genuinely absent
+
+    link.matchedRvPackages.add(pkg.key);
+    link.jsonConsumed.add(itemKey(line));
+    for (const id of pkg.itemIds || []) {
+      const member = mssqlItems.find((it) => normalizeItemId(it.itemId) === normalizeItemId(id));
+      if (member) link.mssqlConsumed.add(itemKey(member));
+    }
+
+    const label = pkg.label || pkg.key;
+    // The line carries the package total. If it came through at 0 the Ticket
+    // is holding the price in packageSummary instead, so use that.
+    let ticketPrice = Number(line.extendedPrice) || 0;
+    if (!ticketPrice && (jsonInvoice.packages || []).length === 1) {
+      ticketPrice = Number(jsonInvoice.packages[0].price) || 0;
+    }
+    if (!eqNum(ticketPrice, pkg.price)) {
+      pushDiff(out, 'packages', `${label}/price`, ticketPrice, pkg.price);
+    }
+    const jBag = productBag(line.sku, line.cover, line.grade, line.ven);
+    const mBag = productBag(pkg.label);
+    if (jBag.length && mBag.length && !bagsEqual(jBag, mBag)) {
+      pushDiff(out, 'packages', `${label}/sku`,
+        [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pkg.label);
+    }
+
+    // Show the package on the Ticket card too, so both sides read the same.
+    if (!(jsonInvoice.packages || []).some((p) => packageBareId(p.key) === bare)) {
+      jsonInvoice.packages = (jsonInvoice.packages || []).concat([{
+        key: normalizeItemId(line.itemId),
+        label: [line.ven, line.sku].filter(Boolean).join(' ') || String(line.itemId),
+        price: ticketPrice,
+        itemIds: [],
+        bookedAsSingleLine: true,
+      }]);
+    }
+  }
+  return link;
+}
+
+function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
+  const a = (jsonPackages || []).filter((p) => !p.bookedAsSingleLine);
+  const b = (mssqlPackages || []).filter((p) => !(link && link.matchedRvPackages.has(p.key)));
   if (!a.length && !b.length) return;
 
   const ids = (pkg) => new Set((pkg.itemIds || []).map(normalizeItemId).filter(Boolean));
@@ -306,8 +384,9 @@ function compare(jsonInvoice, mssqlRecord) {
   // pass noTaxSale flag into diffTotals so tax+total checks can be skipped
   diffDates(jsonInvoice.dates, mssqlRecord.dates, out);
   diffTotals(jsonInvoice.totals, mssqlRecord.totals, out, { noTaxSale: jsonInvoice.noTaxSale });
-  diffPackages(jsonInvoice.packages, mssqlRecord.packages, out);
-  diffItems(jsonInvoice.items, mssqlRecord.items, out);
+  const pkgLink = linkTicketPackageLines(jsonInvoice, mssqlRecord, out);
+  diffPackages(jsonInvoice.packages, mssqlRecord.packages, out, pkgLink);
+  diffItems(jsonInvoice.items, mssqlRecord.items, out, pkgLink);
   return {
     matched: true,
     diffs: out,

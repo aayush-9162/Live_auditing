@@ -896,7 +896,9 @@ function renderPackagesSection(packages, diffSet) {
       fieldRow('Price', '$' + num(pkg.price), isDiff),
       pkg.listTotal ? fieldRow('List total', '$' + num(pkg.listTotal), false) : '',
       pkg.savings ? fieldRow('Savings', '$' + num(pkg.savings), false) : '',
-      fieldRow('Items', members.length ? members.join(', ') : '(not resolved)', false),
+      fieldRow('Items', members.length
+        ? members.join(', ')
+        : (pkg.bookedAsSingleLine ? 'booked as one line' : '(not resolved)'), false),
     ].join('');
     return `
       <div class="item-block${isDiff ? ' has-diff' : ''}">
