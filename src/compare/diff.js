@@ -240,7 +240,13 @@ function packageBareId(key) {
 // line represents the whole package. Compare it against the package total and
 // mark both sides' rows as accounted for so the item diff leaves them alone.
 function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
-  const link = { matchedRvPackages: new Set(), jsonConsumed: new Set(), mssqlConsumed: new Set() };
+  // `jsonIds` / `mssqlIds` keep the raw item ids so the UI can tell which rows
+  // are already explained by a package and skip the "(not on this side)"
+  // placeholders for them.
+  const link = {
+    matchedRvPackages: new Set(), jsonConsumed: new Set(), mssqlConsumed: new Set(),
+    jsonIds: [], mssqlIds: [],
+  };
   const jsonItems = jsonInvoice.items || [];
   const mssqlItems = mssqlRecord.items || [];
 
@@ -252,9 +258,13 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
 
     link.matchedRvPackages.add(pkg.key);
     link.jsonConsumed.add(itemKey(line));
+    link.jsonIds.push(String(line.itemId));
     for (const id of pkg.itemIds || []) {
       const member = mssqlItems.find((it) => normalizeItemId(it.itemId) === normalizeItemId(id));
-      if (member) link.mssqlConsumed.add(itemKey(member));
+      if (member) {
+        link.mssqlConsumed.add(itemKey(member));
+        link.mssqlIds.push(String(member.itemId));
+      }
     }
 
     const label = pkg.label || pkg.key;
@@ -392,6 +402,8 @@ function compare(jsonInvoice, mssqlRecord) {
     diffs: out,
     json: jsonInvoice,
     mssql: mssqlRecord,
+    // Rows the two sides account for differently but agree on, via a package.
+    packageReconciled: { jsonIds: pkgLink.jsonIds, mssqlIds: pkgLink.mssqlIds },
   };
 }
 

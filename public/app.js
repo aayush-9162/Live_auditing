@@ -240,6 +240,14 @@ function renderAudit(data) {
   // Compute a stable item ordering: JSON's items first (in order), then any
   // RV-only items at the end. Both side cards render this same sequence.
   const itemOrder = computeItemOrder(json.items, mssql.items);
+  // Rows a package already accounts for. The Ticket books the package on one
+  // line and RV explodes it into components, so each side is legitimately
+  // missing the other's rows — showing "(not on this side)" for them reads as
+  // a discrepancy when there isn't one.
+  const reconciled = new Set(
+    [...((data.packageReconciled || {}).jsonIds || []), ...((data.packageReconciled || {}).mssqlIds || [])]
+      .map((id) => itemKeyFor({ itemId: id })),
+  );
 
   const status = totalReal === 0
     ? `<div class="status-badge ok"><span class="dot"></span>All match</div>`
@@ -304,9 +312,9 @@ function renderAudit(data) {
     </div>
 
     <div class="compare-grid">
-      ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder,
+      ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder, reconciled,
         `<button id="viewTicketPdf" class="view-pdf-btn" data-name="${esc(json.customer.name)}" title="Open the customer ticket PDF from Google Drive">📄 View Ticket PDF</button>`)}
-      ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder,
+      ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder, reconciled,
         `<button id="openRvViewer" class="view-rv-btn">📋 View in RV</button>`)}
     </div>
 
@@ -715,7 +723,7 @@ function gmBadge(rec) {
   return `<span class="gm-badge ${cls}" title="Total Cost: $${num(t.totalCost || 0)}">GM ${num(pct)}%</span>`;
 }
 
-function sideCard(title, source, rec, side, diffSet, itemOrder, extraAction = '') {
+function sideCard(title, source, rec, side, diffSet, itemOrder, reconciled = new Set(), extraAction = '') {
   const c = rec.customer || {};
   const d = rec.dates || {};
   const t = rec.totals || {};
@@ -791,7 +799,7 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, extraAction = ''
     <div class="notes-block${rec.notes ? '' : ' empty'}">${rec.notes ? esc(rec.notes) : '(no notes)'}</div>`;
 
   const packagesHtml = renderPackagesSection(rec.packages, diffSet);
-  const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet);
+  const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet, reconciled);
 
   return `
     <div class="compare-card">
@@ -917,19 +925,23 @@ function renderPackagesSection(packages, diffSet) {
     </div>`;
 }
 
-function renderItemsSection(items, itemOrder, diffSet) {
+function renderItemsSection(items, itemOrder, diffSet, reconciled = new Set()) {
   if (!itemOrder || itemOrder.length === 0) return '';
+
+  // Drop keys this side doesn't carry because a package already accounts for
+  // them — they belong to the Packages section, not the item list.
+  const keys = itemOrder.filter((key) => findItemByKey(items, key) || !reconciled.has(key));
 
   // Decide which item keys to show — hide-matched mode drops blocks with no
   // diffs (and no missing-side markers).
   const visibleKeys = hideMatchedRows
-    ? itemOrder.filter((key) => itemHasAnyDiff(key, diffSet))
-    : itemOrder;
+    ? keys.filter((key) => itemHasAnyDiff(key, diffSet))
+    : keys;
 
   if (!visibleKeys.length) {
     return `
       <div class="card-section">
-        <div class="card-section-label">Items (${itemOrder.length})</div>
+        <div class="card-section-label">Items (${keys.length})</div>
         <div class="muted" style="padding:10px 4px;font-size:12.5px;">All items match.</div>
       </div>`;
   }
@@ -951,7 +963,7 @@ function renderItemsSection(items, itemOrder, diffSet) {
 
   return `
     <div class="card-section">
-      <div class="card-section-label">Items (${visibleKeys.length} of ${itemOrder.length})</div>
+      <div class="card-section-label">Items (${visibleKeys.length} of ${keys.length})</div>
       ${blocks}
     </div>`;
 }
