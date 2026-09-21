@@ -53,6 +53,10 @@ function daysBetween(a, b) {
   return Math.abs(Math.round((t2 - t1) / 86400000));
 }
 
+// Ticket types that never reach RV, so there is no sale to audit.
+// "QS" is a quote sheet.
+const SKIP_INVOICE_TYPES = new Set(['QS']);
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -125,7 +129,12 @@ app.get('/api/invoices', async (req, res) => {
     }
 
     const raw = await fetchInvoicesByDate(date);
-    const records = (raw.data || []).map((rec) => ({ rec, norm: normalizeInvoice(rec) }));
+    const all = (raw.data || []).map((rec) => ({ rec, norm: normalizeInvoice(rec) }));
+    // Quote sheets (invoice_type "QS") are not posted sales, so there is
+    // nothing in RV to audit them against. Leave them out of the list rather
+    // than reporting every one as a missing RV sale.
+    const records = all.filter(({ norm }) => !SKIP_INVOICE_TYPES.has(String(norm.invoiceType || '').toUpperCase()));
+    const skipped = all.length - records.length;
 
     // Drive lookups run in parallel — a failed one only costs that row its
     // PDF badge, it never fails the list.
@@ -170,7 +179,7 @@ app.get('/api/invoices', async (req, res) => {
       });
     });
 
-    res.json({ ok: true, date, count: list.length, invoices: list });
+    res.json({ ok: true, date, count: list.length, skipped, invoices: list });
   } catch (err) {
     res.status(500).json({ error: err.message, code: err.code });
   }
