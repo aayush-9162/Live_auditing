@@ -175,6 +175,9 @@ function normalizeInvoice(rec) {
         description: toStr(it.descriptionOverride || it.description),
         salePrice: toNumber(it.salePrice),
         extendedPrice: toNumber(it.extendedPrice),
+        // Members of a package carry its key. Their extendedPrice is 0 —
+        // the money sits on the package, not the line (see `packages`).
+        packageKey: toStr(it.packageKey),
       }));
       // Mirror the RV-side aggregation: if the same numeric itemId appears
       // on multiple rows (each qty=1), collapse to a single row with summed
@@ -201,9 +204,33 @@ function normalizeInvoice(rec) {
           const g = groups.get(key);
           g.qty = (Number(g.qty) || 0) + (Number(it.qty) || 0);
           g.extendedPrice = (Number(g.extendedPrice) || 0) + (Number(it.extendedPrice) || 0);
+          if (!g.packageKey && it.packageKey) g.packageKey = it.packageKey;
         }
       }
       return [...groups.values()];
+    })(),
+
+    // Packages. The Ticket prices a package as a whole and leaves every
+    // member line at 0, so without this the package price is invisible to
+    // the audit even though RV prints it as its own roll-up row.
+    packages: (() => {
+      const summary = fj.packageSummary || {};
+      const out = [];
+      for (const [key, info] of Object.entries(summary)) {
+        if (!info || info.applied === false) continue;
+        const price = toNumber(info.packagePrice);
+        const members = items.filter((it) => toStr(it.packageKey) === key);
+        if (!price && !members.length) continue;
+        out.push({
+          key,
+          label: toStr(info.label) || key,
+          price,
+          listTotal: toNumber(info.computedTotal),
+          savings: toNumber(info.savings),
+          itemIds: members.map((it) => toStr(it.itemId)).filter(Boolean),
+        });
+      }
+      return out;
     })(),
   };
 }

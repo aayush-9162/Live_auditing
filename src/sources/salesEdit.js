@@ -102,12 +102,78 @@ function findLocalSalesEdit(customerName) {
   };
 }
 
+// Fallback: go through the sale's folder instead of searching for the file.
+//
+// Drive's full-text `name contains` index is eventually consistent, and a
+// recently filed PDF can be missing from those results for hours while being
+// perfectly visible in the Drive UI — the same query then starts returning it
+// with nothing about the file having changed. That is what makes a sale look
+// like it was never posted to RV when its PDF is sitting right there.
+//
+// Listing a folder's children by parent id is a direct parent-child lookup
+// rather than a text search, so it doesn't have that problem. Each sale is
+// filed under "<sale no> <CUSTOMER NAME>" (sometimes with a year in front),
+// and those folders are created before the PDFs land in them, so the folder
+// is reliably findable even when the PDF is not.
+async function findViaFolder(customerName) {
+  const drive = getDriveClient();
+  const safe = driveEscape(String(customerName || '').trim());
+  if (!safe) return null;
+
+  const folders = await drive.files.list({
+    q: [
+      `name contains '${safe}'`,
+      `mimeType = 'application/vnd.google-apps.folder'`,
+      `trashed = false`,
+    ].join(' and '),
+    fields: 'files(id, name)',
+    orderBy: 'createdTime desc',
+    pageSize: 5,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+
+  for (const folder of folders.data.files || []) {
+    const kids = await drive.files.list({
+      q: `'${folder.id}' in parents and mimeType = 'application/pdf' and trashed = false`,
+      fields: 'files(id, name, createdTime, modifiedTime, webViewLink, capabilities(canDownload))',
+      pageSize: 100,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    const hit = (kids.data.files || [])
+      .filter((f) => f.name.toUpperCase().includes(SUFFIX))
+      .sort((a, b) => rank(a, customerName) - rank(b, customerName)
+        || String(b.createdTime).localeCompare(String(a.createdTime)))[0];
+    if (hit) return { ...hit, folderId: folder.id, folderName: folder.name };
+  }
+  return null;
+}
+
+// Pull the RV sale number out of a folder name like "1309070 JEFF GIUNTA" or
+// "2026 1309050 KAREN EDMUND" — the longest run of digits is the sale number,
+// a leading year is not.
+function salesNoFromFolderName(folderName) {
+  const runs = String(folderName || '').match(/\d+/g) || [];
+  const best = runs.filter((r) => r.length >= 6).sort((a, b) => b.length - a.length)[0];
+  return best || '';
+}
+
 // The first hit is the one to audit — same as picking the top row in Drive.
 async function findSalesEditPdf(customerName) {
   const local = findLocalSalesEdit(customerName);
   if (local) return local;
+
   const files = await searchSalesEditPdfs(customerName, { limit: 10 });
-  return files[0] || null;
+  if (files[0]) return files[0];
+
+  // Nothing by filename — the search index may simply not have caught up yet.
+  const viaFolder = await findViaFolder(customerName);
+  if (viaFolder) {
+    console.log(`sales-edit: "${customerName}" found via folder "${viaFolder.folderName}" (filename search missed it)`);
+    return viaFolder;
+  }
+  return null;
 }
 
 async function downloadPdf(fileId) {
@@ -155,6 +221,20 @@ async function loadSalesEdit(file) {
 
   const { pages } = await extractLines(buffer);
   const parsed = parseSalesEdit(pages);
+
+  // Resolve the containing folder name when the filename search found the
+  // file directly (the folder fallback already knows it). The folder is named
+  // after the sale, so it gives a free check on the number inside the PDF.
+  let folderName = file.folderName || '';
+  if (!folderName && !file.localPath && file.parents && file.parents[0]) {
+    try {
+      const drive = getDriveClient();
+      const parent = await drive.files.get({
+        fileId: file.parents[0], fields: 'name', supportsAllDrives: true,
+      });
+      folderName = parent.data.name || '';
+    } catch (e) { /* non-fatal — the cross-check is simply skipped */ }
+  }
   const result = {
     ...parsed,
     file: {
@@ -163,6 +243,11 @@ async function loadSalesEdit(file) {
       createdTime: file.createdTime,
       webViewLink: file.webViewLink,
       local: Boolean(file.localPath),
+      folderName,
+      // The folder is named after the sale, so its number is an independent
+      // check on the one printed inside the PDF.
+      folderSalesNo: salesNoFromFolderName(folderName),
+      viaFolder: Boolean(file.folderId),
     },
   };
 
@@ -181,6 +266,8 @@ async function fetchSaleForCustomer(customerName) {
 module.exports = {
   searchSalesEditPdfs,
   findSalesEditPdf,
+  findViaFolder,
+  salesNoFromFolderName,
   loadSalesEdit,
   fetchSaleForCustomer,
 };

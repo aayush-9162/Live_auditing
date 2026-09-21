@@ -511,6 +511,37 @@ function parseTotals(lines, from, anchors) {
   return { totals, salesperson, remarks, cashBreakdown };
 }
 
+// Work out which lines belong to each package.
+//
+// The report prints a package as a roll-up row carrying the package price,
+// immediately followed by its component lines. RV allocates the package price
+// across those components, so the members are exactly the run of following
+// rows whose extended prices add up to the roll-up. Walk forward until the
+// running total lands on the package price; if it never does (an unexpected
+// layout), leave the rows unassigned rather than guessing.
+function linkPackageMembers(rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const pkg = rows[i];
+    if (!pkg.__is_package) continue;
+
+    const target = Number(pkg.sale_price) || 0;
+    const members = [];
+    let sum = 0;
+    for (let j = i + 1; j < rows.length && !rows[j].__is_package; j++) {
+      sum += Number(rows[j].sale_price) || 0;
+      members.push(rows[j]);
+      if (Math.abs(sum - target) < 0.01) break;
+    }
+
+    if (target > 0 && Math.abs(sum - target) < 0.01) {
+      for (const m of members) m.__package_of = pkg.sale_item;
+      pkg.__member_item_ids = members.map((m) => m.sale_item);
+    } else {
+      pkg.__member_item_ids = [];
+    }
+  }
+}
+
 // Shape the parsed report the way the MSSQL source used to: a salesopendaily
 // header row, a CustMaster row, and Sale_DetailRV item rows.
 function buildRows({ customer, info, items, totals, salesperson, remarks, cashBreakdown, pageCount }) {
@@ -597,9 +628,9 @@ function buildRows({ customer, info, items, totals, salesperson, remarks, cashBr
     cust_email:      bill.email,
   };
 
-  // The package roll-up row repeats the revenue of its component lines. The
-  // downstream normalizer already drops rows whose item id starts with
-  // "*PKG", so tag it the same way and keep the real id alongside.
+  // The package roll-up row repeats the revenue of its component lines, so it
+  // is tagged "*PKG…" — the downstream normalizer lifts those out of `items`
+  // into their own `packages` list rather than double-counting them.
   const rows = items.map((it) => {
     const row = { ...it, sale_profit_ctr: customer.profitCenter };
     if (it.__is_package) {
@@ -608,6 +639,8 @@ function buildRows({ customer, info, items, totals, salesperson, remarks, cashBr
     }
     return row;
   });
+
+  linkPackageMembers(rows);
 
   return { header, custMaster, items: rows, totals };
 }

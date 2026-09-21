@@ -258,6 +258,12 @@ function renderAudit(data) {
 
   // The report prints a delivery route label rather than the raw code, so say
   // so when the label wasn't one this app knows how to translate.
+  // The Drive folder name carries the sale number; disagreeing with the PDF
+  // means the search resolved to the wrong file.
+  const folderBanner = data.salesNoMatchesFolder === false
+    ? `<div class="banner error" style="margin-bottom:14px;"><b>Wrong file?</b> The Drive folder is numbered <code>${esc(data.folderSalesNo)}</code> but the PDF inside it reports sale <code>${esc(mssql.salesNo)}</code>. Check the file before trusting this audit.</div>`
+    : '';
+
   const viaBanner = (data.deliveryViaLabel && data.deliveryViaMapped === false)
     ? `<div class="banner warn" style="margin-bottom:14px;"><b>Unrecognised delivery route.</b> The PDF says <code>${esc(data.deliveryViaLabel)}</code>, which doesn't map to a known RV DeliveryVia code — it is being compared as-is. Add it to <code>RV_DELIVERY_VIA_MAP</code> in <code>.env</code> to fix the comparison.</div>`
     : '';
@@ -285,6 +291,7 @@ function renderAudit(data) {
 
     ${noTaxBanner}
     ${fuzzyBanner}
+    ${folderBanner}
     ${viaBanner}
 
     <div class="summary-chips">
@@ -292,6 +299,7 @@ function renderAudit(data) {
       ${chip('Dates',    grpCount('dates'))}
       ${chip('Totals',   grpCount('totals'))}
       ${chip('Items',    grpCount('items'))}
+      ${(json.packages || []).length || (mssql.packages || []).length ? chip('Packages', grpCount('packages')) : ''}
       ${gmChip(mssql.totals)}
     </div>
 
@@ -782,6 +790,7 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, extraAction = ''
     <div class="card-mini-section">NOTES</div>
     <div class="notes-block${rec.notes ? '' : ' empty'}">${rec.notes ? esc(rec.notes) : '(no notes)'}</div>`;
 
+  const packagesHtml = renderPackagesSection(rec.packages, diffSet);
   const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet);
 
   return `
@@ -798,6 +807,7 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, extraAction = ''
       <div class="card-body">
         ${headerHtml}
         ${notesHtml}
+        ${packagesHtml}
         ${itemsHtml}
       </div>
     </div>`;
@@ -870,6 +880,41 @@ function fieldRow(label, value, isDiff, suffixHtml = '', labelExtraClass = '') {
 
 // Render an items section inside a side card. Both cards receive the same
 // itemOrder so item N on the left aligns with item N on the right.
+// Packages are priced as a whole: the Ticket leaves every member line at 0
+// and RV allocates the total across them. Showing the package alongside its
+// members is the only way either side's item prices make sense.
+function renderPackagesSection(packages, diffSet) {
+  const list = packages || [];
+  if (!list.length) return '';
+
+  const touched = [...diffSet].filter((f) => f.startsWith('packages/'));
+  const blocks = list.map((pkg) => {
+    const label = pkg.label || pkg.key || 'Package';
+    const isDiff = touched.some((f) => f.includes(label));
+    const members = (pkg.itemIds || []).filter(Boolean);
+    const rows = [
+      fieldRow('Price', '$' + num(pkg.price), isDiff),
+      pkg.listTotal ? fieldRow('List total', '$' + num(pkg.listTotal), false) : '',
+      pkg.savings ? fieldRow('Savings', '$' + num(pkg.savings), false) : '',
+      fieldRow('Items', members.length ? members.join(', ') : '(not resolved)', false),
+    ].join('');
+    return `
+      <div class="item-block${isDiff ? ' has-diff' : ''}">
+        <div class="item-block-head">
+          <span class="item-block-title">Package</span>
+          <span class="item-block-id">${esc(label)}</span>
+        </div>
+        ${rows}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="card-section">
+      <div class="card-section-label">Packages (${list.length})</div>
+      ${blocks}
+    </div>`;
+}
+
 function renderItemsSection(items, itemOrder, diffSet) {
   if (!itemOrder || itemOrder.length === 0) return '';
 
@@ -940,10 +985,13 @@ function renderItemBlock(it, key, diffSet) {
     : `<div class="muted" style="font-size:12px;padding:4px 0;">all fields match</div>`;
 
   const transferBadge = it.isTransfer ? `<span class="transfer-badge" title="Item is on transfer (A=OT in salesitemdetail)">TRANSFER</span>` : '';
+  const packageBadge = it.packageKey
+    ? `<span class="package-badge" title="Priced as part of package ${esc(it.packageKey)}">IN PACKAGE</span>`
+    : '';
   return `
     <div class="item-block${it.isTransfer ? ' is-transfer' : ''}">
       <div class="item-block-head">
-        <span class="item-block-title">Item${transferBadge}</span>
+        <span class="item-block-title">Item${packageBadge}${transferBadge}</span>
         <span class="item-block-id">${esc(it.itemId || it.sku || key)}</span>
       </div>
       ${fieldsHtml}

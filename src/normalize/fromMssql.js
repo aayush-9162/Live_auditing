@@ -124,6 +124,8 @@ function normalizeItem(row) {
     loc:          toStr(row.sale_loc),
     seq:          toNumber(row.sale_seq),
     isTransfer:   !!row.__transfer,
+    // Set on lines that RV allocated out of a package roll-up.
+    packageKey:   toStr(row.__package_of),
   };
 }
 
@@ -247,9 +249,27 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
           g.qty = (Number(g.qty) || 0) + (Number(it.qty) || 0);
           g.extendedPrice = (Number(g.extendedPrice) || 0) + (Number(it.extendedPrice) || 0);
           if (it.isTransfer) g.isTransfer = true;   // any source row transfer → group is transfer
+          if (!g.packageKey && it.packageKey) g.packageKey = it.packageKey;
         }
       }
       return [...groups.values()];
+    })(),
+    // Package roll-ups. These are kept out of `items` (their revenue is
+    // already on the component lines) but the price still has to be audited,
+    // so they surface here the same way the Ticket's own packages do.
+    packages: (() => {
+      return (itemRows || [])
+        .filter((r) => r.__is_package)
+        .map((r) => {
+          const it = normalizeItem(r);
+          return {
+            key:     toStr(r.sale_item),
+            label:   [it.ven, it.sku, it.cover].filter(Boolean).join(' ') || toStr(r.sale_item),
+            price:   toNumber(r.sale_price),
+            itemIds: (r.__member_item_ids || []).map((id) => stripLeadingZeros(trimAll(id))),
+            description: it.description,
+          };
+        });
     })(),
     fees: (() => {
       const totals = { deliveryCharge: 0, carePlanCharge: 0 };

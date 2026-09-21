@@ -202,6 +202,69 @@ function itemLabel(it) {
   return id ? `${id} ${sku}`.trim() : sku || '?';
 }
 
+// Packages. The Ticket prices a package as a whole and leaves every member
+// line at 0; RV prints a roll-up row carrying the same total and allocates it
+// across the member lines. Neither side's item rows can be compared on price
+// for these, so the package total is what gets audited.
+//
+// The two sides name packages differently ("bedroom" vs "*PKG1253243"), so
+// pair them by how many member items they share, falling back to an equal
+// price when membership is unknown.
+function diffPackages(jsonPackages, mssqlPackages, out) {
+  const a = jsonPackages || [];
+  const b = mssqlPackages || [];
+  if (!a.length && !b.length) return;
+
+  const ids = (pkg) => new Set((pkg.itemIds || []).map(normalizeItemId).filter(Boolean));
+  const overlap = (x, y) => {
+    const sy = ids(y);
+    let n = 0;
+    for (const id of ids(x)) if (sy.has(id)) n++;
+    return n;
+  };
+
+  const takenB = new Set();
+  for (const pkg of a) {
+    let best = -1;
+    let bestScore = 0;
+    b.forEach((cand, i) => {
+      if (takenB.has(i)) return;
+      const score = overlap(pkg, cand);
+      if (score > bestScore) { bestScore = score; best = i; }
+    });
+    // No shared members (RV couldn't resolve membership) — fall back to price.
+    if (best < 0) {
+      best = b.findIndex((cand, i) => !takenB.has(i) && eqNum(cand.price, pkg.price));
+    }
+    // Still nothing, and exactly one package each side — they must be the pair.
+    if (best < 0 && a.length === 1 && b.length === 1 && !takenB.has(0)) best = 0;
+
+    const label = pkg.label || pkg.key || 'package';
+    if (best < 0) {
+      pushDiff(out, 'packages', `missing-in-mssql:${label}`, pkg, null);
+      continue;
+    }
+    takenB.add(best);
+    const match = b[best];
+    if (!eqNum(pkg.price, match.price)) {
+      pushDiff(out, 'packages', `${label}/price`, pkg.price, match.price);
+    }
+    if (pkg.itemIds && match.itemIds && match.itemIds.length) {
+      const missing = [...ids(pkg)].filter((id) => !ids(match).has(id));
+      const extra   = [...ids(match)].filter((id) => !ids(pkg).has(id));
+      if (missing.length || extra.length) {
+        pushDiff(out, 'packages', `${label}/items`,
+          (pkg.itemIds || []).join(', '), (match.itemIds || []).join(', '));
+      }
+    }
+  }
+
+  b.forEach((pkg, i) => {
+    if (takenB.has(i)) return;
+    pushDiff(out, 'packages', `missing-in-json:${pkg.label || pkg.key || 'package'}`, null, pkg);
+  });
+}
+
 function diffDeliveryVia(jsonInvoice, mssqlRecord, out) {
   const expected = expectedDeliveryVia({
     state: (jsonInvoice.customer.delivery && jsonInvoice.customer.delivery.state) || jsonInvoice.customer.state,
@@ -243,6 +306,7 @@ function compare(jsonInvoice, mssqlRecord) {
   // pass noTaxSale flag into diffTotals so tax+total checks can be skipped
   diffDates(jsonInvoice.dates, mssqlRecord.dates, out);
   diffTotals(jsonInvoice.totals, mssqlRecord.totals, out, { noTaxSale: jsonInvoice.noTaxSale });
+  diffPackages(jsonInvoice.packages, mssqlRecord.packages, out);
   diffItems(jsonInvoice.items, mssqlRecord.items, out);
   return {
     matched: true,

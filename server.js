@@ -299,6 +299,14 @@ app.get('/api/audit', async (req, res) => {
     const rvDate = (mssqlNorm && mssqlNorm.dates && mssqlNorm.dates.order) || '';
     const dateOffDays = rvDate ? daysBetween(date, rvDate) : 0;
 
+    // The Drive folder is named "<sale no> <CUSTOMER NAME>", so its number is
+    // an independent check on the SALES-NO printed inside the PDF. They should
+    // always agree; if they don't, the wrong file was picked up.
+    const folderSalesNo = sale.file.folderSalesNo || '';
+    const salesNoMatchesFolder = folderSalesNo
+      ? String(folderSalesNo) === String(header.SalesNo || '').trim()
+      : null;
+
     res.json({
       ok: true,
       date,
@@ -309,6 +317,8 @@ app.get('/api/audit', async (req, res) => {
       fuzzyNameMatched: !match.nameOk,
       matchConfidence: match,
       dateOffDays,
+      folderSalesNo,
+      salesNoMatchesFolder,
       expectedDeliveryVia: expectedVia,
       // The report prints a delivery route label ("Delivery Van #1"), not the
       // raw DeliveryVia code, so say when the mapping was a guess.

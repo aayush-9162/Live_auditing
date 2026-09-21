@@ -1491,3 +1491,18 @@ table.rv-items td.c { text-align: center; }
   .sidebar { width: 280px; }
   .content { padding: 20px; }
 }
+
+/* Package membership badge on an item block. Mirrors .transfer-badge. */
+.package-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  background: var(--accent-soft, rgba(99, 102, 241, .16));
+  color: var(--accent, #6366f1);
+  border: 1px solid var(--accent, #6366f1);
+  vertical-align: middle;
+}
