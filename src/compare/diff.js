@@ -274,22 +274,14 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
     if (!ticketPrice && (jsonInvoice.packages || []).length === 1) {
       ticketPrice = Number(jsonInvoice.packages[0].price) || 0;
     }
-    if (!eqNum(ticketPrice, pkg.price)) {
-      pushDiff(out, 'packages', `${label}/price`, ticketPrice, pkg.price);
-    }
-    const jBag = productBag(line.sku, line.cover, line.grade, line.ven);
-    const mBag = productBag(pkg.label);
-    if (jBag.length && mBag.length && !bagsEqual(jBag, mBag)) {
-      pushDiff(out, 'packages', `${label}/sku`,
-        [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pkg.label);
-    }
 
     // Show the package on the Ticket card too, so both sides read the same.
-    if (!(jsonInvoice.packages || []).some((p) => packageBareId(p.key) === bare)) {
-      // Carry the line's own detail onto the package entry — it is the only
-      // place the Ticket describes this product, and the line itself is left
-      // out of the item list to avoid showing it twice.
-      jsonInvoice.packages = (jsonInvoice.packages || []).concat([{
+    // Carry the line's own detail onto it — this is the only place the Ticket
+    // describes the product, and the line itself is kept out of the item list
+    // so it isn't shown twice.
+    let derived = (jsonInvoice.packages || []).find((p) => packageBareId(p.key) === bare) || null;
+    if (!derived) {
+      derived = {
         key: normalizeItemId(line.itemId),
         label: [line.ven, line.sku].filter(Boolean).join(' ') || String(line.itemId),
         price: ticketPrice,
@@ -301,7 +293,26 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
         sku: line.sku,
         description: line.description,
         salePrice: line.salePrice,
-      }]);
+      };
+      jsonInvoice.packages = (jsonInvoice.packages || []).concat([derived]);
+    }
+
+    // Flag both sides' entries directly. Matching them up in the UI by label
+    // is not safe — the two systems spell the same product differently (RV
+    // collapses the double space in "B697 58/56/97  PORTER RUSTIC"), which
+    // would hide a real mismatch in the default view.
+    const markDiff = () => { pkg.hasDiff = true; derived.hasDiff = true; };
+
+    if (!eqNum(ticketPrice, pkg.price)) {
+      pushDiff(out, 'packages', `${label}/price`, ticketPrice, pkg.price);
+      markDiff();
+    }
+    const jBag = productBag(line.sku, line.cover, line.grade, line.ven);
+    const mBag = productBag(pkg.label);
+    if (jBag.length && mBag.length && !bagsEqual(jBag, mBag)) {
+      pushDiff(out, 'packages', `${label}/sku`,
+        [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pkg.label);
+      markDiff();
     }
   }
   return link;
@@ -339,12 +350,15 @@ function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
     const label = pkg.label || pkg.key || 'package';
     if (best < 0) {
       pushDiff(out, 'packages', `missing-in-mssql:${label}`, pkg, null);
+      pkg.hasDiff = true;
       continue;
     }
     takenB.add(best);
     const match = b[best];
+    const markDiff = () => { pkg.hasDiff = true; match.hasDiff = true; };
     if (!eqNum(pkg.price, match.price)) {
       pushDiff(out, 'packages', `${label}/price`, pkg.price, match.price);
+      markDiff();
     }
     if (pkg.itemIds && match.itemIds && match.itemIds.length) {
       const missing = [...ids(pkg)].filter((id) => !ids(match).has(id));
@@ -352,6 +366,7 @@ function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
       if (missing.length || extra.length) {
         pushDiff(out, 'packages', `${label}/items`,
           (pkg.itemIds || []).join(', '), (match.itemIds || []).join(', '));
+        markDiff();
       }
     }
   }
@@ -359,6 +374,7 @@ function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
   b.forEach((pkg, i) => {
     if (takenB.has(i)) return;
     pushDiff(out, 'packages', `missing-in-json:${pkg.label || pkg.key || 'package'}`, null, pkg);
+    pkg.hasDiff = true;
   });
 }
 

@@ -308,6 +308,7 @@ function renderAudit(data) {
       ${chip('Totals',   grpCount('totals'))}
       ${chip('Items',    grpCount('items'))}
       ${(json.packages || []).length || (mssql.packages || []).length ? chip('Packages', grpCount('packages')) : ''}
+      ${viaChip(mssql.deliveryVia, data.expectedDeliveryVia)}
       ${gmChip(mssql.totals)}
     </div>
 
@@ -702,6 +703,26 @@ function chip(label, count) {
     </div>`;
 }
 
+// Same delivery-route information as the header badge, rendered as a summary
+// chip so it sits alongside the other counts.
+function viaChip(via, expected) {
+  if (!via && !expected) return '';
+  const code = String(via || '').trim().toUpperCase();
+  const exp  = expected ? String(expected).trim().toUpperCase() : null;
+  const isDelivery = (code || exp || '').startsWith('D');
+  const label = isDelivery ? '🚚 Delivery via' : '🏬 Pickup at';
+  const mismatch = exp && code && exp !== code;
+  const cls = mismatch ? 'error' : (exp && code ? 'ok' : '');
+  const title = mismatch
+    ? `expected ${exp} by the delivery-via rules`
+    : (exp ? `matches expected ${exp}` : 'RV delivery route (DeliveryVia)');
+  return `
+    <div class="chip chip-via ${cls}" title="${esc(title)}">
+      <span class="chip-label">${label}</span>
+      <span class="chip-value">${esc(code || '—')}${mismatch ? ` <span class="chip-expected">exp ${esc(exp)}</span>` : ''}</span>
+    </div>`;
+}
+
 function gmChip(totals) {
   const t = totals || {};
   if (t.grossMarginPct == null) return '';
@@ -895,10 +916,24 @@ function renderPackagesSection(packages, diffSet) {
   const list = packages || [];
   if (!list.length) return '';
 
-  const touched = [...diffSet].filter((f) => f.startsWith('packages/'));
-  const blocks = list.map((pkg) => {
+  // The diff engine flags the packages it found problems with. Don't try to
+  // re-derive that from the label — the two systems spell the same product
+  // differently, so a string match would silently hide a real mismatch.
+  const packageHasDiff = (pkg) => pkg.hasDiff === true;
+
+  // Default view shows only what needs attention, same as the item list.
+  const visible = hideMatchedRows ? list.filter(packageHasDiff) : list;
+  if (!visible.length) {
+    return `
+      <div class="card-section">
+        <div class="card-section-label">Packages (${list.length})</div>
+        <div class="muted" style="padding:10px 4px;font-size:12.5px;">All packages match.</div>
+      </div>`;
+  }
+
+  const blocks = visible.map((pkg) => {
     const label = pkg.label || pkg.key || 'Package';
-    const isDiff = touched.some((f) => f.includes(label));
+    const isDiff = packageHasDiff(pkg);
     const members = (pkg.itemIds || []).filter(Boolean);
     const rows = [
       pkg.itemId ? fieldRow('Item ID', pkg.itemId, false) : '',
@@ -926,7 +961,7 @@ function renderPackagesSection(packages, diffSet) {
 
   return `
     <div class="card-section">
-      <div class="card-section-label">Packages (${list.length})</div>
+      <div class="card-section-label">Packages (${visible.length} of ${list.length})</div>
       ${blocks}
     </div>`;
 }

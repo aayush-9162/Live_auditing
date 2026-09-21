@@ -1506,3 +1506,14 @@ table.rv-items td.c { text-align: center; }
   border: 1px solid var(--accent, #6366f1);
   vertical-align: middle;
 }
+
+/* Delivery-route summary chip. The code is short, so it uses the monospace
+   face like the gross-margin chip rather than the wide numeric style. */
+.chip.chip-via .chip-value { font-family: 'JetBrains Mono', monospace; font-size: 15px; }
+.chip.chip-via .chip-expected {
+  font-family: 'Inter', sans-serif;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-mute);
+  margin-left: 4px;
+}
