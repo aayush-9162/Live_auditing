@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sales Audit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <button id="sidebarToggle" class="sidebar-toggle" title="Hide/show sidebar"><span>‹</span></button>
+  <div class="sidebar-scroll-buttons">
+    <button id="sidebarScrollUp"   class="sidebar-scroll-btn" title="Scroll sidebar up">▲</button>
+    <button id="sidebarScrollDown" class="sidebar-scroll-btn" title="Scroll sidebar down">▼</button>
+  </div>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">SA</div>
+      <div>
+        <div class="brand-title">Sales Audit</div>
+        <div class="brand-sub">invoices-archive vs RV SALES EDIT pdf</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <label class="field-label">Audit date</label>
+      <input type="date" id="date" />
+      <button id="loadBtn" class="primary block">Load invoices</button>
+    </div>
+
+    <div class="sidebar-section flex-1 invoice-section">
+      <div class="section-head">
+        <span>Invoices</span>
+        <span id="invoiceCount" class="count-pill">0</span>
+      </div>
+      <div class="store-filter">
+        <button class="store-btn active" data-store="">All</button>
+        <button class="store-btn" data-store="arden">Arden</button>
+        <button class="store-btn" data-store="waynesville">Waynesville</button>
+      </div>
+      <div id="invoiceList" class="invoice-list"></div>
+    </div>
+
+    <div class="sidebar-footer">
+      <span id="mode" class="mode-badge"></span>
+      <button id="themeToggle" class="theme-toggle" title="Toggle light/dark mode">🌙</button>
+      <span id="hostLabel" class="muted-sm"></span>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="scroll-buttons">
+      <button id="scrollUp" class="scroll-btn" title="Scroll up">▲</button>
+      <button id="scrollDown" class="scroll-btn" title="Scroll down">▼</button>
+    </div>
+    <div id="result" class="result-empty">
+      <div class="empty-state">
+        <div class="empty-icon">⇄</div>
+        <h2>Pick an invoice to audit</h2>
+        <p>Select a customer from the left to compare their <b>invoices-archive</b> record against the <b>SALES EDIT</b> PDF archived on Google Drive.</p>
+      </div>
+    </div>
+  </main>
+
+  <dialog id="rvViewer" class="rv-dialog">
+    <div id="rvViewerContent"></div>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

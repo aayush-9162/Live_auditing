@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Environment — .env holds the LAN API host and the RV code overrides.
+# .env.example is tracked as the template; never commit the real one.
+.env
+.env.local
+.env.*.local
+
+# Google Drive OAuth credentials. gdrive-client.json is the app's client
+# secret and gdrive-token.json is a live refresh token that grants access to
+# the company Drive — both must be provisioned on the server out of band,
+# never through the repo. src/sources/drive.js also rewrites the token file
+# whenever Google refreshes it, so it changes at runtime.
+secrets/*
+!secrets/.gitkeep
+secrets
+# Dev fixtures: copies of real invoices-archive responses, so they carry
+# customer names, addresses, phone numbers and emails. Production runs with
+# MODE=prod and never reads them. Drop these two lines if you would rather
+# keep the sample data in the repo.
+fixtures/
+sales_15_may.json
+
+# Hand-downloaded SALES EDIT PDFs used with SALES_EDIT_LOCAL_DIR
+*.pdf
+
+# Logs and runtime output
+*.log
+npm-debug.log*
+logs/
+pids/
+*.pid
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

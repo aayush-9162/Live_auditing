@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RV View</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #ece9d8; width: 100%; height: 100%; overflow: hidden; }
+    #rvViewerContent {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    /* When the RV app is standalone (not in a dialog) let it fill the page */
+    #rvViewerContent .rv-app { width: 100vw; height: 100vh; }
+    #rvViewerContent .rv-titlebar .rv-close { display: none; }
+
+    /* Force high-contrast text everywhere in the standalone view so no cell
+       looks "faded" against the ecru form background. */
+    #rvViewerContent .rv-content,
+    #rvViewerContent table.rv-items td,
+    #rvViewerContent table.rv-items th {
+      color: #000 !important;
+    }
+    #rvViewerContent table.rv-items tbody td { font-weight: 500; }
+    #rvViewerContent table.rv-items tbody tr:nth-child(even) td { background: #f5f5ea; }
+    #rvViewerContent input[readonly] { color: #000 !important; opacity: 1 !important; }
+
+    .rv-loading { padding: 40px; text-align: center; color: #666; font: 14px 'Inter', sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="rvViewerContent"><div class="rv-loading">Loading RV view…</div></div>
+  <script src="/app.js"></script>
+  <script>
+    (async () => {
+      const q = new URLSearchParams(location.search);
+      const date = q.get('date');
+      const invoiceId = q.get('invoiceId');
+      if (!date || !invoiceId) {
+        document.getElementById('rvViewerContent').innerHTML =
+          '<div class="rv-loading">Missing date/invoiceId in URL.</div>';
+        return;
+      }
+      const url = `/api/audit?date=${encodeURIComponent(date)}&invoiceId=${encodeURIComponent(invoiceId)}`;
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!data.ok || !data.matched) {
+          const why = data.error || 'No SALES EDIT PDF on Drive for this ticket.';
+          document.getElementById('rvViewerContent').innerHTML =
+            `<div class="rv-loading">${why}</div>`;
+          return;
+        }
+        document.title = `RV — ${(data.json && data.json.customer && data.json.customer.name) || 'Sale'}`;
+        const rv = data.rvRaw || {};
+        const diffs = data.diffs || [];
+        const sellers = (data.json && data.json.sellerNames) || [];
+        document.getElementById('rvViewerContent').innerHTML = renderRvViewer(rv, diffs, sellers);
+      } catch (err) {
+        document.getElementById('rvViewerContent').innerHTML =
+          `<div class="rv-loading">Failed to load: ${err.message}</div>`;
+      }
+    })();
+  </script>
+</body>
+</html>

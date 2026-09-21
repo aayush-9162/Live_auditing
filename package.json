@@ -1,0 +1,17 @@
+{
+  "name": "sales-auditing-tool",
+  "version": "0.1.0",
+  "description": "Compare invoices-archive (Node app) against the RV SALES EDIT PDF archived on Google Drive and report mismatches",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "googleapis": "^173.0.0",
+    "pdfjs-dist": "^4.10.38"
+  }
+}
