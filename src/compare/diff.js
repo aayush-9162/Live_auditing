@@ -286,12 +286,21 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
 
     // Show the package on the Ticket card too, so both sides read the same.
     if (!(jsonInvoice.packages || []).some((p) => packageBareId(p.key) === bare)) {
+      // Carry the line's own detail onto the package entry — it is the only
+      // place the Ticket describes this product, and the line itself is left
+      // out of the item list to avoid showing it twice.
       jsonInvoice.packages = (jsonInvoice.packages || []).concat([{
         key: normalizeItemId(line.itemId),
         label: [line.ven, line.sku].filter(Boolean).join(' ') || String(line.itemId),
         price: ticketPrice,
         itemIds: [],
         bookedAsSingleLine: true,
+        itemId: String(line.itemId || '').trim(),
+        qty: line.qty,
+        ven: line.ven,
+        sku: line.sku,
+        description: line.description,
+        salePrice: line.salePrice,
       }]);
     }
   }

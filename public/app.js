@@ -244,10 +244,10 @@ function renderAudit(data) {
   // line and RV explodes it into components, so each side is legitimately
   // missing the other's rows — showing "(not on this side)" for them reads as
   // a discrepancy when there isn't one.
-  const reconciled = new Set(
-    [...((data.packageReconciled || {}).jsonIds || []), ...((data.packageReconciled || {}).mssqlIds || [])]
-      .map((id) => itemKeyFor({ itemId: id })),
-  );
+  const pr = data.packageReconciled || {};
+  const ticketPackageRows = new Set((pr.jsonIds || []).map((id) => itemKeyFor({ itemId: id })));
+  const rvPackageMembers  = new Set((pr.mssqlIds || []).map((id) => itemKeyFor({ itemId: id })));
+  const reconciled = new Set([...ticketPackageRows, ...rvPackageMembers]);
 
   const status = totalReal === 0
     ? `<div class="status-badge ok"><span class="dot"></span>All match</div>`
@@ -312,9 +312,9 @@ function renderAudit(data) {
     </div>
 
     <div class="compare-grid">
-      ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder, reconciled,
+      ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder, { reconciled, ownPackageRows: ticketPackageRows },
         `<button id="viewTicketPdf" class="view-pdf-btn" data-name="${esc(json.customer.name)}" title="Open the customer ticket PDF from Google Drive">📄 View Ticket PDF</button>`)}
-      ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder, reconciled,
+      ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder, { reconciled, ownPackageRows: new Set() },
         `<button id="openRvViewer" class="view-rv-btn">📋 View in RV</button>`)}
     </div>
 
@@ -723,7 +723,7 @@ function gmBadge(rec) {
   return `<span class="gm-badge ${cls}" title="Total Cost: $${num(t.totalCost || 0)}">GM ${num(pct)}%</span>`;
 }
 
-function sideCard(title, source, rec, side, diffSet, itemOrder, reconciled = new Set(), extraAction = '') {
+function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, extraAction = '') {
   const c = rec.customer || {};
   const d = rec.dates || {};
   const t = rec.totals || {};
@@ -799,7 +799,7 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, reconciled = new
     <div class="notes-block${rec.notes ? '' : ' empty'}">${rec.notes ? esc(rec.notes) : '(no notes)'}</div>`;
 
   const packagesHtml = renderPackagesSection(rec.packages, diffSet);
-  const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet, reconciled);
+  const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet, pkgView);
 
   return `
     <div class="compare-card">
@@ -901,12 +901,18 @@ function renderPackagesSection(packages, diffSet) {
     const isDiff = touched.some((f) => f.includes(label));
     const members = (pkg.itemIds || []).filter(Boolean);
     const rows = [
+      pkg.itemId ? fieldRow('Item ID', pkg.itemId, false) : '',
+      pkg.qty ? fieldRow('Qty', pkg.qty, false) : '',
+      pkg.ven ? fieldRow('Vendor', pkg.ven, false) : '',
+      pkg.sku ? fieldRow('SKU', pkg.sku, false) : '',
+      pkg.description ? fieldRow('Description', pkg.description, false) : '',
+      pkg.salePrice ? fieldRow('Sale Price', '$' + num(pkg.salePrice), false) : '',
       fieldRow('Price', '$' + num(pkg.price), isDiff),
       pkg.listTotal ? fieldRow('List total', '$' + num(pkg.listTotal), false) : '',
       pkg.savings ? fieldRow('Savings', '$' + num(pkg.savings), false) : '',
       fieldRow('Items', members.length
         ? members.join(', ')
-        : (pkg.bookedAsSingleLine ? 'booked as one line' : '(not resolved)'), false),
+        : (pkg.bookedAsSingleLine ? 'booked as one line on the Ticket' : '(not resolved)'), false),
     ].join('');
     return `
       <div class="item-block${isDiff ? ' has-diff' : ''}">
@@ -925,12 +931,27 @@ function renderPackagesSection(packages, diffSet) {
     </div>`;
 }
 
-function renderItemsSection(items, itemOrder, diffSet, reconciled = new Set()) {
+function renderItemsSection(items, itemOrder, diffSet, pkgView = {}) {
   if (!itemOrder || itemOrder.length === 0) return '';
 
-  // Drop keys this side doesn't carry because a package already accounts for
-  // them — they belong to the Packages section, not the item list.
-  const keys = itemOrder.filter((key) => findItemByKey(items, key) || !reconciled.has(key));
+  const reconciled = pkgView.reconciled || new Set();
+  const ownPackageRows = pkgView.ownPackageRows || new Set();
+
+  // Two kinds of row belong to the Packages section rather than here: this
+  // side's own package line (the Ticket books the whole package on one line),
+  // and the other side's rows that the package already accounts for.
+  const keys = itemOrder.filter((key) => {
+    if (ownPackageRows.has(key)) return false;
+    return findItemByKey(items, key) || !reconciled.has(key);
+  });
+
+  if (!keys.length) {
+    return `
+      <div class="card-section">
+        <div class="card-section-label">Items (0)</div>
+        <div class="muted" style="padding:10px 4px;font-size:12.5px;">No separate line items — everything on this sale is in the package above.</div>
+      </div>`;
+  }
 
   // Decide which item keys to show — hide-matched mode drops blocks with no
   // diffs (and no missing-side markers).
