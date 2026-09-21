@@ -1517,3 +1517,32 @@ table.rv-items td.c { text-align: center; }
   color: var(--text-mute);
   margin-left: 4px;
 }
+
+/* Sidebar row footer: RV sale number on the left, audit outcome on the right.
+   The mark is filled in asynchronously once each PDF has been checked. */
+.iv-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  min-height: 16px;
+}
+.iv-sale-no {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+.iv-status { font-size: 12px; font-weight: 700; line-height: 1; }
+.iv-status .st-pending { color: var(--text-mute); opacity: .5; }
+.iv-status .st-ok      { color: var(--green); font-size: 14px; }
+.iv-status .st-diff {
+  background: var(--amber);
+  color: #1a1a1a;
+  border-radius: 9px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+}
+.iv-status .st-blocked,
+.iv-status .st-nopdf   { color: var(--text-mute); font-weight: 500; }
+.iv-status .st-error   { color: var(--red); }

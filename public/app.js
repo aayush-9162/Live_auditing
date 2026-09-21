@@ -96,6 +96,7 @@ async function loadInvoices() {
   const date = $('#date').value;
   $('#invoiceList').innerHTML = skeleton(5);
   $('#invoiceCount').textContent = '…';
+  auditStatus.clear();          // results belong to the date being loaded
   try {
     const { invoices } = await getJSON(`/api/invoices?date=${date}`);
     currentInvoices = invoices;
@@ -127,25 +128,86 @@ function renderInvoices(list) {
     $('#invoiceList').innerHTML = '<p class="muted" style="padding:12px 8px;font-size:13px;">No invoices for this date.</p>';
     return;
   }
-  $('#invoiceList').innerHTML = list.map((inv, i) => {
-    // The sale number only becomes known once the PDF is parsed, so the list
-    // shows whether a SALES EDIT PDF exists for the customer instead.
-    const pdfLabel = inv.pdf
-      ? `${inv.pdf.canDownload ? '📄' : '🔒'} ${esc(inv.pdf.name)}`
-      : '<span class="muted">no SALES EDIT pdf</span>';
-    return `
+  $('#invoiceList').innerHTML = list.map((inv, i) => `
       <div class="invoice-item" data-index="${i}" data-id="${inv.id}">
         <div class="iv-name">
           <span>${esc(inv.name || '—')}</span>
           <span class="iv-total">$${num(inv.total)}</span>
         </div>
         <div class="iv-sub">${esc(inv.city)}, ${esc(inv.state)} · ${esc(inv.invoiceType)} · ${esc(inv.orderDate)}</div>
-        <div class="iv-sub mono-sm">${pdfLabel}</div>
-      </div>`;
-  }).join('');
+        <div class="iv-foot">
+          <span class="iv-sale-no" data-sale-for="${inv.id}">${renderSaleNo(inv.id)}</span>
+          <span class="iv-status" data-status-for="${inv.id}">${renderStatus(inv.id)}</span>
+        </div>
+      </div>`).join('');
   $('#invoiceList').querySelectorAll('.invoice-item').forEach((el) => {
     el.addEventListener('click', () => audit(Number(el.dataset.id), el));
   });
+  // Fill in the sale number and the pass/fail mark in the background so the
+  // list is usable immediately instead of waiting on every PDF.
+  checkInvoices(list);
+}
+
+// Audit outcome per invoice id, so re-rendering the list (store filter, say)
+// doesn't re-run anything.
+const auditStatus = new Map();
+
+function renderSaleNo(id) {
+  const st = auditStatus.get(id);
+  if (!st || !st.salesNo) return '';
+  return `Sale #${esc(st.salesNo)}`;
+}
+
+function renderStatus(id) {
+  const st = auditStatus.get(id);
+  if (!st) return '<span class="st-pending" title="checking…">·</span>';
+  if (st.state === 'clean')   return '<span class="st-ok" title="no mismatches">✓</span>';
+  if (st.state === 'diffs')   return `<span class="st-diff" title="${st.count} mismatch${st.count === 1 ? '' : 'es'}">${st.count}</span>`;
+  if (st.state === 'blocked') return '<span class="st-blocked" title="Drive would not release the PDF">🔒</span>';
+  if (st.state === 'nopdf')   return '<span class="st-nopdf" title="no SALES EDIT pdf on Drive">—</span>';
+  return '<span class="st-error" title="check failed">!</span>';
+}
+
+function paintStatus(id) {
+  const saleEl = document.querySelector(`[data-sale-for="${id}"]`);
+  if (saleEl) saleEl.innerHTML = renderSaleNo(id);
+  const stEl = document.querySelector(`[data-status-for="${id}"]`);
+  if (stEl) stEl.innerHTML = renderStatus(id);
+}
+
+// Run the audits a few at a time — each one may pull a PDF off Drive.
+async function checkInvoices(list) {
+  const date = $('#date').value;
+  const pending = list.filter((inv) => !auditStatus.has(inv.id));
+  const queue = pending.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const inv = queue.shift();
+      auditStatus.set(inv.id, await checkOne(date, inv.id));
+      paintStatus(inv.id);
+    }
+  };
+  await Promise.all([1, 2, 3, 4].map(worker));
+}
+
+async function checkOne(date, id) {
+  try {
+    const data = await getJSON(`/api/audit?date=${date}&invoiceId=${id}`);
+    return statusFromAudit(data);
+  } catch (e) {
+    return { state: 'error' };
+  }
+}
+
+function statusFromAudit(data) {
+  if (data.ok === false) {
+    if (data.stage === 'drive-download') return { state: 'blocked' };
+    if (data.stage === 'drive-search')   return { state: 'nopdf' };
+    return { state: 'error' };
+  }
+  const count = (data.diffs || []).filter((d) => d.field !== '_note').length;
+  const salesNo = (data.mssql && data.mssql.salesNo) || '';
+  return { state: count === 0 ? 'clean' : 'diffs', count, salesNo };
 }
 
 async function audit(invoiceId, el) {
@@ -158,6 +220,8 @@ async function audit(invoiceId, el) {
   try {
     const url = `/api/audit?date=${date}&invoiceId=${invoiceId}`;
     const data = await getJSON(url);
+    auditStatus.set(invoiceId, statusFromAudit(data));
+    paintStatus(invoiceId);
     renderAudit(data);
   } catch (e) {
     $('#result').innerHTML = `<div class="banner error">${esc(e.message)}<pre>${esc(JSON.stringify(e.data || {}, null, 2))}</pre></div>`;
@@ -276,9 +340,6 @@ function renderAudit(data) {
     ? `<div class="banner warn" style="margin-bottom:14px;"><b>Unrecognised delivery route.</b> The PDF says <code>${esc(data.deliveryViaLabel)}</code>, which doesn't map to a known RV DeliveryVia code — it is being compared as-is. Add it to <code>RV_DELIVERY_VIA_MAP</code> in <code>.env</code> to fix the comparison.</div>`
     : '';
 
-  const sourceLine = data.driveFile
-    ? `<div class="audit-sub mono-sm">RV source: <a href="${esc(data.driveFile.webViewLink || '#')}" target="_blank" rel="noopener">${esc(data.driveFile.name)}</a></div>`
-    : '';
 
   $('#result').className = '';
   $('#result').innerHTML = `
@@ -286,7 +347,6 @@ function renderAudit(data) {
       <div class="audit-title">
         <h1>${esc(json.customer.name)}</h1>
         <div class="audit-sub">invoice #${esc(json.id)} · ${esc(json.slug)} · sale #${esc(mssql.salesNo || '—')}</div>
-        ${sourceLine}
       </div>
       <div class="audit-header-right">
         <button id="toggleMatched" class="ghost small-btn" title="Toggle visibility of matched fields">
