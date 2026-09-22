@@ -566,6 +566,20 @@ function linkPackageMembers(rows) {
   }
 }
 
+// RV records a pickup's delivery-date field as the literal "ASAP" even when a
+// date has been agreed; the date itself is typed into the sales remarks, as in
+// "NOT CLEAR for Pickup. Pickup Date - 09-26-2026." Recover it so the audit
+// compares against a date rather than the ASAP marker.
+function pickupDateFromRemarks(text) {
+  const m = String(text || '').match(
+    /\b(?:pick\s*-?\s*up|delivery)\s*date\b\s*[-:.]?\s*(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/i,
+  );
+  if (!m) return '';
+  const [, mm, dd, yy] = m;
+  const year = yy.length === 2 ? `20${yy}` : yy;
+  return `${year}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+}
+
 // Shape the parsed report the way the MSSQL source used to: a salesopendaily
 // header row, a CustMaster row, and Sale_DetailRV item rows.
 function buildRows({ customer, info, items, totals, salesperson, remarks, cashBreakdown, pageCount }) {
@@ -624,6 +638,9 @@ function buildRows({ customer, info, items, totals, salesperson, remarks, cashBr
     cust_phone_no:   customer.phones.cell || customer.phones.home,
     cust_phone_no_2: customer.phones.home,
 
+    // A pickup date RV only recorded in the remarks (see above).
+    __pickup_date:      pickupDateFromRemarks(remarks.join(' ')),
+    __ship_date_field:  shipDate,
     __deliver_label:    deliverLabel,
     __terms_label:      termsLabel,
     __due_date:         clean(info['DUE DATE:']),

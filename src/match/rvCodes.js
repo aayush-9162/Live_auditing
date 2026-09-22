@@ -30,6 +30,7 @@ const TERMS = {
   'C O D': 'COD',
   'COD': 'COD',
   'CASH ON DELIVERY': 'COD',
+  'COLLECT ON DELIVERY': 'COD',
   'BALANCE ON DELIVERY': 'COD',
   'FINANCE': 'FIN',
   'FINANCED': 'FIN',

@@ -207,14 +207,21 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
       const rawDelivery = pick(head, FIELD_MAP.deliveryDate);
       // RV stores either a date or the literal string "ASAP" (pickup orders).
       const isAsap = String(rawDelivery || '').trim().toUpperCase() === 'ASAP';
-      const delivery = isAsap ? 'ASAP' : normalizeDate(rawDelivery);
+      // A pickup is also recognisable from its delivery-via code, which is
+      // what keeps `isPickup` right when a date has been recovered below.
+      const viaCode = trimAll(head.DeliveryVia).toUpperCase();
+      const isPickup = isAsap || viaCode.startsWith('P');
+      // "ASAP" with an agreed date typed into the remarks: compare the date.
+      const fromRemarks = normalizeDate(head.__pickup_date || '');
+      const delivery = isAsap ? (fromRemarks || 'ASAP') : normalizeDate(rawDelivery);
       return {
         order:    normalizeDate(pick(head, FIELD_MAP.orderDate)),
         delivery,
-        pickup:   '',
+        pickup:   isPickup ? delivery : '',
         deliveryOption: '',
         effective: delivery,
-        isPickup: isAsap,
+        isPickup,
+        dateFromRemarks: Boolean(isAsap && fromRemarks),
       };
     })(),
     totals: {
