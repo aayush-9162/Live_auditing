@@ -7,9 +7,10 @@ async function getJSON(url, opts) {
   return data;
 }
 
-function yesterdayISO() {
+// Local date, not UTC — toISOString() would roll over to tomorrow in the
+// evening for anyone west of Greenwich.
+function todayISO() {
   const d = new Date();
-  d.setDate(d.getDate() - 1);
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
@@ -52,7 +53,7 @@ async function init() {
   });
 
   const dateInput = $('#date');
-  if (dateInput && !dateInput.value) dateInput.value = yesterdayISO();
+  if (dateInput && !dateInput.value) dateInput.value = todayISO();
 
   const health = await getJSON('/api/health').catch(() => ({ mode: '?' }));
   $('#mode').textContent = `mode: ${health.mode}`;
