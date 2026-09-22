@@ -2,8 +2,9 @@
 //
 // This replaces the old MSSQL salesopendaily/Sale_DetailRV queries. Each sale
 // is archived to Drive as "<CUSTOMER NAME> SALES EDIT.pdf" inside a folder
-// named "<ticket no> <CUSTOMER NAME>", so a name search finds the sale the
-// same way a person would.
+// named "<sale no> <CUSTOMER NAME>" under a single sales-root folder. The
+// lookup walks that tree by parent id rather than searching by filename —
+// see findViaFolder for why that distinction matters.
 
 const fs = require('fs');
 const path = require('path');
@@ -102,49 +103,171 @@ function findLocalSalesEdit(customerName) {
   };
 }
 
-// Fallback: go through the sale's folder instead of searching for the file.
+// ---------------------------------------------------------------------------
+// Finding the sale on Drive
 //
-// Drive's full-text `name contains` index is eventually consistent, and a
-// recently filed PDF can be missing from those results for hours while being
-// perfectly visible in the Drive UI — the same query then starts returning it
-// with nothing about the file having changed. That is what makes a sale look
-// like it was never posted to RV when its PDF is sitting right there.
+// Never by filename search: Drive's full-text `name contains` index is
+// eventually consistent, and a freshly filed PDF can be missing from those
+// results for hours while sitting in plain sight in the Drive UI. That is what
+// makes a sale look like it was never posted to RV. Listing children by parent
+// id does not go through that index, so every lookup below walks the tree.
 //
-// Listing a folder's children by parent id is a direct parent-child lookup
-// rather than a text search, so it doesn't have that problem. Each sale is
-// filed under "<sale no> <CUSTOMER NAME>" (sometimes with a year in front),
-// and those folders are created before the PDFs land in them, so the folder
-// is reliably findable even when the PDF is not.
-async function findViaFolder(customerName) {
+// Where a sale lives depends on how old it is:
+//
+//   Audit Arden / A SEP 21 / 1309090 DIANE DILLINGHAM / …SALES EDIT.pdf
+//     the working day's sales, filed per store. Past days keep only the batch
+//     and cash reports — "A SEPTEMBER 2026 / A SEP 20" has no sale folders.
+//   CFC Data / All Sales / 1309070 JEFF GIUNTA / …
+//   CFC Data / " A TO  MOVE TO ARCHIVE" / 2026 1309050 KAREN EDMUND / …
+//     where a sale moves once its day is closed out.
+//
+// So the day folder is checked first, then the two flat roots.
+
+const STORE_ROOTS = {
+  arden:       process.env.AUDIT_ARDEN_FOLDER_ID       || '1WNQV45NSjcsVY3G8QbbSzX-Ph7AjHRHc',
+  waynesville: process.env.AUDIT_WAYNESVILLE_FOLDER_ID || '1gC8qL6-Xj-DwOq0WbC4FtS2K1kfyyJmb',
+};
+const STORE_PREFIX = { arden: 'A', waynesville: 'W' };
+
+const MONTH_FULL = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+  'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+const MONTH_ABBR = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+// Sales already moved out of the day folders.
+const DEFAULT_SALES_ROOTS = [
+  '1bo4WxaTEo2tFn_aLg-hvf0FavQeZFTLI',   // All Sales
+  '1KSHk2_M_qcq2vCVxKQGaI-x6xkNlQ6Pp',   // " A TO  MOVE TO ARCHIVE"
+];
+const SALES_ROOT_IDS = (process.env.SALES_ROOT_FOLDER_IDS || '')
+  .split(',').map((x) => x.trim()).filter(Boolean);
+const salesRoots = () => (SALES_ROOT_IDS.length ? SALES_ROOT_IDS : DEFAULT_SALES_ROOTS);
+
+const FOLDER_TTL_MS = 60 * 1000;
+const childCache = new Map();          // folderId -> { at, items }
+
+function isDir(f) {
+  return f.mimeType === 'application/vnd.google-apps.folder';
+}
+
+// `fresh` skips the cache. A cache hit must never be the reason a just-filed
+// sale looks missing, so any lookup that comes up empty re-runs with fresh.
+async function listChildren(folderId, { fresh = false } = {}) {
+  const hit = childCache.get(folderId);
+  if (!fresh && hit && Date.now() - hit.at < FOLDER_TTL_MS) return hit.items;
+
   const drive = getDriveClient();
-  const safe = driveEscape(String(customerName || '').trim());
-  if (!safe) return null;
-
-  const folders = await drive.files.list({
-    q: [
-      `name contains '${safe}'`,
-      `mimeType = 'application/vnd.google-apps.folder'`,
-      `trashed = false`,
-    ].join(' and '),
-    fields: 'files(id, name)',
-    orderBy: 'createdTime desc',
-    pageSize: 5,
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true,
-  });
-
-  for (const folder of folders.data.files || []) {
-    const kids = await drive.files.list({
-      q: `'${folder.id}' in parents and mimeType = 'application/pdf' and trashed = false`,
-      fields: 'files(id, name, createdTime, modifiedTime, webViewLink, capabilities(canDownload))',
-      pageSize: 100,
+  const items = [];
+  let pageToken = null;
+  do {
+    const res = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, webViewLink, capabilities(canDownload))',
+      orderBy: 'createdTime desc',
+      pageSize: 1000,
+      pageToken,
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
-    const hit = (kids.data.files || [])
-      .filter((f) => f.name.toUpperCase().includes(SUFFIX))
-      .sort((a, b) => rank(a, customerName) - rank(b, customerName)
-        || String(b.createdTime).localeCompare(String(a.createdTime)))[0];
+    items.push(...(res.data.files || []));
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+
+  childCache.set(folderId, { at: Date.now(), items });
+  return items;
+}
+
+function nameTokens(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+// Folders are named "<sale no> <CUSTOMER NAME>", sometimes with a year in
+// front or a note after ("1309130 PAT CROWLEY Hold for Esign"). Require every
+// part of the customer's name as a whole word so "Ann Smith" can't match
+// "Maryann Smithson".
+function folderMatchesCustomer(folderName, customerName) {
+  const want = nameTokens(customerName);
+  if (!want.length) return false;
+  const have = new Set(nameTokens(folderName));
+  return want.every((t) => have.has(t));
+}
+
+function salesEditPdfs(files, customerName) {
+  return files
+    .filter((f) => !isDir(f) && /\.pdf$/i.test(f.name) && f.name.toUpperCase().includes(SUFFIX))
+    .sort((a, b) => rank(a, customerName) - rank(b, customerName)
+      || String(b.createdTime).localeCompare(String(a.createdTime)));
+}
+
+// "A SEP 20" for the day, "A SEPTEMBER 2026" for the month that holds it.
+function dayFolderNames(store, date) {
+  const prefix = STORE_PREFIX[store];
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ''));
+  if (!prefix || !m) return null;
+  const month = Number(m[2]) - 1;
+  return {
+    day: `${prefix} ${MONTH_ABBR[month]} ${m[3]}`,
+    month: `${prefix} ${MONTH_FULL[month]} ${m[1]}`,
+  };
+}
+
+async function findDayFolder(store, date, opts = {}) {
+  const rootId = STORE_ROOTS[store];
+  const names = dayFolderNames(store, date);
+  if (!rootId || !names) return null;
+
+  const top = await listChildren(rootId, opts);
+  const eq = (f, want) => isDir(f) && f.name.trim().toUpperCase().replace(/\s+/g, ' ') === want;
+
+  // The working day sits at the top level; closed days move under the month.
+  const direct = top.find((f) => eq(f, names.day));
+  if (direct) return direct;
+
+  const monthFolder = top.find((f) => eq(f, names.month));
+  if (!monthFolder) return null;
+  return (await listChildren(monthFolder.id, opts)).find((f) => eq(f, names.day)) || null;
+}
+
+// The day folder holds one subfolder per sale, plus the occasional loose PDF
+// for a sale that never got its own folder.
+async function findInDayFolder(customerName, store, date, opts = {}) {
+  let folder;
+  try {
+    folder = await findDayFolder(store, date, opts);
+  } catch (e) {
+    console.warn(`sales-edit: day folder lookup failed for ${store} ${date}: ${e.message}`);
+    return null;
+  }
+  if (!folder) return null;
+
+  const kids = await listChildren(folder.id, opts);
+
+  const loose = salesEditPdfs(kids, customerName)
+    .filter((f) => folderMatchesCustomer(f.name, customerName))[0];
+  if (loose) return { ...loose, folderName: folder.name, dayFolder: folder.name };
+
+  for (const sub of kids.filter(isDir).filter((f) => folderMatchesCustomer(f.name, customerName))) {
+    const hit = salesEditPdfs(await listChildren(sub.id, opts), customerName)[0];
+    if (hit) return { ...hit, folderId: sub.id, folderName: sub.name, dayFolder: folder.name };
+  }
+  return null;
+}
+
+// Sales that have moved out of their day folder into one of the flat roots.
+async function findViaFolder(customerName, opts = {}) {
+  const folders = [];
+  for (const root of salesRoots()) {
+    try {
+      folders.push(...(await listChildren(root, opts)).filter(isDir));
+    } catch (e) {
+      // One unreachable root shouldn't sink the others.
+      console.warn(`sales-edit: could not list root ${root}: ${e.message}`);
+    }
+  }
+  folders.sort((a, b) => String(b.createdTime).localeCompare(String(a.createdTime)));
+
+  for (const folder of folders.filter((f) => folderMatchesCustomer(f.name, customerName))) {
+    const hit = salesEditPdfs(await listChildren(folder.id, opts), customerName)[0];
     if (hit) return { ...hit, folderId: folder.id, folderName: folder.name };
   }
   return null;
@@ -160,20 +283,40 @@ function salesNoFromFolderName(folderName) {
 }
 
 // The first hit is the one to audit — same as picking the top row in Drive.
-async function findSalesEditPdf(customerName) {
+// `store` ("arden" | "waynesville") and `date` (YYYY-MM-DD) come off the
+// Ticket and point straight at the day folder. Without them the day-folder
+// step is skipped and the flat roots do the work.
+async function findSalesEditPdf(customerName, { store = '', date = '' } = {}) {
   const local = findLocalSalesEdit(customerName);
   if (local) return local;
 
-  const files = await searchSalesEditPdfs(customerName, { limit: 10 });
-  if (files[0]) return files[0];
+  const stores = STORE_ROOTS[store] ? [store] : Object.keys(STORE_ROOTS);
 
-  // Nothing by filename — the search index may simply not have caught up yet.
-  const viaFolder = await findViaFolder(customerName);
-  if (viaFolder) {
-    console.log(`sales-edit: "${customerName}" found via folder "${viaFolder.folderName}" (filename search missed it)`);
-    return viaFolder;
-  }
-  return null;
+  const walk = async (opts) => {
+    // 1. The store's day folder — where a sale lives while it is current.
+    if (date) {
+      for (const st of stores) {
+        const hit = await findInDayFolder(customerName, st, date, opts);
+        if (hit) return hit;
+      }
+    }
+    // 2. The flat roots, for sales whose day has been closed out.
+    return findViaFolder(customerName, opts);
+  };
+
+  const cached = await walk({});
+  if (cached) return cached;
+
+  // Nothing found. Before reporting the sale as missing, repeat the walk
+  // against Drive rather than the cache — a sale filed in the last minute
+  // would otherwise be invisible for no good reason.
+  const live = await walk({ fresh: true });
+  if (live) return live;
+
+  // 3. Last resort: a name search. Reaches sales moved off to the archive
+  //    drive, at the cost of being subject to the index lag described above.
+  const files = await searchSalesEditPdfs(customerName, { limit: 10 });
+  return files[0] || null;
 }
 
 async function downloadPdf(fileId) {
@@ -267,6 +410,8 @@ module.exports = {
   searchSalesEditPdfs,
   findSalesEditPdf,
   findViaFolder,
+  findInDayFolder,
+  findDayFolder,
   salesNoFromFolderName,
   loadSalesEdit,
   fetchSaleForCustomer,

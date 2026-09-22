@@ -53,6 +53,11 @@ function daysBetween(a, b) {
   return Math.abs(Math.round((t2 - t1) / 86400000));
 }
 
+// Which store wrote the ticket — picks the Drive day folder to look in.
+function storeOf(rec) {
+  return String((rec && rec.form_json && rec.form_json.storeLocation) || '').trim().toLowerCase();
+}
+
 // Ticket types that never reach RV, so there is no sale to audit.
 // "QS" is a quote sheet.
 const SKIP_INVOICE_TYPES = new Set(['QS']);
@@ -138,8 +143,8 @@ app.get('/api/invoices', async (req, res) => {
 
     // Drive lookups run in parallel — a failed one only costs that row its
     // PDF badge, it never fails the list.
-    const files = await Promise.all(records.map(({ norm }) =>
-      findSalesEditPdf(norm.customer.name).catch((e) => {
+    const files = await Promise.all(records.map(({ rec, norm }) =>
+      findSalesEditPdf(norm.customer.name, { store: storeOf(rec), date }).catch((e) => {
         console.warn(`drive lookup failed for "${norm.customer.name}": ${e.message}`);
         return null;
       }),
@@ -226,7 +231,7 @@ app.get('/api/audit', async (req, res) => {
 
     let file;
     try {
-      file = await findSalesEditPdf(lookupName);
+      file = await findSalesEditPdf(lookupName, { store: storeOf(rec), date });
     } catch (e) {
       return res.json({
         ok: false,
