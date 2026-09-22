@@ -35,6 +35,9 @@ const TERMS = {
   'FINANCED': 'FIN',
   'FINANCING': 'FIN',
   'FIN': 'FIN',
+  // GE is the finance house code; the diff treats GE and FIN as equivalent.
+  'GE FINANCE': 'GE',
+  'GE': 'GE',
 };
 
 const DELIVERY_VIA = {

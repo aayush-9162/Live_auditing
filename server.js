@@ -4,7 +4,7 @@ const express = require('express');
 
 const { fetchInvoicesByDate } = require('./src/sources/invoices');
 const { findCustomerPdf, streamPdf } = require('./src/sources/drive');
-const { findSalesEditPdf, loadSalesEdit } = require('./src/sources/salesEdit');
+const { findSalesEditPdf, loadSalesEdit, loadReceiptFor } = require('./src/sources/salesEdit');
 const { normalizeInvoice } = require('./src/normalize/fromJson');
 const { normalizeMssqlRows } = require('./src/normalize/fromMssql');
 const { toFirstLast, namesLooseMatch } = require('./src/match/name');
@@ -116,6 +116,26 @@ app.get('/api/customer-pdf-info', async (req, res) => {
     if (!file) return res.status(404).json({ ok: false, name });
     res.json({ ok: true, id: file.id, name: file.name, createdTime: file.createdTime, webViewLink: file.webViewLink });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Stream one of the sale's own PDFs (SALES EDIT or RV RCPT) by its Drive id,
+// so the audit page can open them without a second lookup. Falls back to the
+// Drive viewer when the shared drive won't release the bytes.
+app.get('/api/sale-pdf', async (req, res) => {
+  const id = String(req.query.id || '').trim();
+  const label = String(req.query.name || 'sale').replace(/[^\w .-]/g, '');
+  if (!/^[A-Za-z0-9_-]{10,}$/.test(id)) return res.status(400).json({ error: 'valid Drive file id required' });
+  try {
+    const pdf = await streamPdf(id);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${label}.pdf"`);
+    pdf.data.pipe(res);
+  } catch (err) {
+    const status = err.response && err.response.status;
+    if (status === 403) return res.redirect(`https://drive.google.com/file/d/${id}/view`);
+    console.error('sale-pdf error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -269,6 +289,39 @@ app.get('/api/audit', async (req, res) => {
     const header = sale.header;
     const itemRows = sale.items;
 
+    // The customer receipt filed beside the SALES EDIT states the whole-sale
+    // totals with one figure per label, where the SALES EDIT prints three
+    // columns that only agree when nothing is back ordered. Use it to check
+    // the figures, and to mark which lines are not shipping yet.
+    const receipt = await loadReceiptFor(file).catch(() => null);
+    const totalsCheck = [];
+    if (receipt) {
+      const near = (a, b) => Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.01;
+      const rt = receipt.totals || {};
+      const pairs = [
+        ['subtotal',   'SaleAmt',      rt.saleTotal],
+        ['tax',        'SaleTaxAmt',   rt.salesTax],
+        ['total',      'SaleTotalAmt', rt.grandTotal],
+        ['amountPaid', 'DownPmt',      rt.paymentReceived],
+        ['balanceDue', 'BalanceDue',   rt.balanceDue],
+      ];
+      for (const [label, key, receiptValue] of pairs) {
+        if (receiptValue === null || receiptValue === undefined) continue;
+        if (near(header[key], receiptValue)) continue;
+        // The receipt is the unambiguous source, so it wins.
+        totalsCheck.push({ field: label, salesEdit: header[key], receipt: receiptValue });
+        header[key] = receiptValue;
+      }
+
+      const normId = (v) => String(v || '').trim().replace(/^0+/, '') || '0';
+      const backOrdered = new Set(
+        (receipt.items || []).filter((i) => i.backOrdered).map((i) => normId(i.itemId)),
+      );
+      for (const row of itemRows) {
+        if (backOrdered.has(normId(row.sale_item))) row.__back_ordered = true;
+      }
+    }
+
     // Gross margin comes straight off the report footer. Fall back to summing
     // the line costs when the footer didn't print it (older report layouts).
     if (header.__gross_margin_pct == null) {
@@ -338,6 +391,11 @@ app.get('/api/audit', async (req, res) => {
       // raw DeliveryVia code, so say when the mapping was a guess.
       deliveryViaLabel: header.__deliver_label,
       deliveryViaMapped: isKnownDeliveryViaLabel(header.__deliver_label),
+      receipt: receipt
+        ? { id: receipt.file.id, name: receipt.file.name, payments: receipt.payments, totals: receipt.totals }
+        : null,
+      // Non-empty when the two RV documents disagreed; the receipt was used.
+      totalsCorrectedFromReceipt: totalsCheck,
       // raw RV data for the View-in-RV modal
       rvRaw: {
         header,

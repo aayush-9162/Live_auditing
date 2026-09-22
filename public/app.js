@@ -336,6 +336,13 @@ function renderAudit(data) {
     ? `<div class="banner error" style="margin-bottom:14px;"><b>Wrong file?</b> The Drive folder is numbered <code>${esc(data.folderSalesNo)}</code> but the PDF inside it reports sale <code>${esc(mssql.salesNo)}</code>. Check the file before trusting this audit.</div>`
     : '';
 
+  // The two RV documents disagreed on the money. The receipt won; say so,
+  // because it means the SALES EDIT was read in a way worth checking.
+  const corrections = data.totalsCorrectedFromReceipt || [];
+  const receiptBanner = corrections.length
+    ? `<div class="banner warn" style="margin-bottom:14px;"><b>Totals taken from the RV receipt.</b> The SALES EDIT and the receipt disagreed on ${corrections.map((c) => `<code>${esc(c.field)}</code> ($${num(c.salesEdit)} vs $${num(c.receipt)})`).join(', ')}. The receipt states the whole sale, so its figures were used.</div>`
+    : '';
+
   const viaBanner = (data.deliveryViaLabel && data.deliveryViaMapped === false)
     ? `<div class="banner warn" style="margin-bottom:14px;"><b>Unrecognised delivery route.</b> The PDF says <code>${esc(data.deliveryViaLabel)}</code>, which doesn't map to a known RV DeliveryVia code — it is being compared as-is. Add it to <code>RV_DELIVERY_VIA_MAP</code> in <code>.env</code> to fix the comparison.</div>`
     : '';
@@ -360,6 +367,7 @@ function renderAudit(data) {
     ${noTaxBanner}
     ${fuzzyBanner}
     ${folderBanner}
+    ${receiptBanner}
     ${viaBanner}
 
     <div class="summary-chips">
@@ -376,7 +384,7 @@ function renderAudit(data) {
       ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder, { reconciled, ownPackageRows: ticketPackageRows },
         `<button id="viewTicketPdf" class="view-pdf-btn" data-name="${esc(json.customer.name)}" title="Open the customer ticket PDF from Google Drive">📄 View Ticket PDF</button>`)}
       ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder, { reconciled, ownPackageRows: new Set() },
-        `<button id="openRvViewer" class="view-rv-btn">📋 View in RV</button>`)}
+        `${salePdfButtons(data)}<button id="openRvViewer" class="view-rv-btn">📋 View in RV</button>`)}
     </div>
 
     ${diffsTable(diffs)}
@@ -390,6 +398,15 @@ function renderAudit(data) {
     if (!inv) return;
     const params = new URLSearchParams({ date, invoiceId: inv });
     window.open(`/rv.html?${params.toString()}`, '_blank', 'noopener');
+  });
+
+  document.querySelectorAll('.sale-pdf-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.fileId;
+      if (!id) return;
+      window.open(`/api/sale-pdf?id=${encodeURIComponent(id)}&name=${encodeURIComponent(btn.dataset.fileName || 'sale')}`,
+        '_blank', 'noopener');
+    });
   });
 
   const pdfBtn = document.getElementById('viewTicketPdf');
@@ -902,6 +919,20 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, ex
     </div>`;
 }
 
+// The two RV documents behind this audit, opened straight from Drive.
+function salePdfButtons(data) {
+  const out = [];
+  const file = data.driveFile;
+  if (file && file.id && !file.local) {
+    out.push(`<button class="sale-pdf-btn" data-file-id="${esc(file.id)}" data-file-name="${esc(file.name)}" title="${esc(file.name)}">📄 SALES EDIT</button>`);
+  }
+  const rcpt = data.receipt;
+  if (rcpt && rcpt.id) {
+    out.push(`<button class="sale-pdf-btn" data-file-id="${esc(rcpt.id)}" data-file-name="${esc(rcpt.name)}" title="${esc(rcpt.name)}">🧾 RV RCPT</button>`);
+  }
+  return out.join('');
+}
+
 function deliveryViaBadge(via, expected) {
   if (!via && !expected) return '';
   const code = String(via || '').trim().toUpperCase();
@@ -1115,13 +1146,16 @@ function renderItemBlock(it, key, diffSet) {
     : `<div class="muted" style="font-size:12px;padding:4px 0;">all fields match</div>`;
 
   const transferBadge = it.isTransfer ? `<span class="transfer-badge" title="Item is on transfer (A=OT in salesitemdetail)">TRANSFER</span>` : '';
+  const backOrderBadge = it.isBackOrdered
+    ? '<span class="bo-badge" title="Ordered but not shipping on this delivery (B/O on the RV receipt)">B/O</span>'
+    : '';
   const packageBadge = it.packageKey
     ? `<span class="package-badge" title="Priced as part of package ${esc(it.packageKey)}">IN PACKAGE</span>`
     : '';
   return `
     <div class="item-block${it.isTransfer ? ' is-transfer' : ''}">
       <div class="item-block-head">
-        <span class="item-block-title">Item${packageBadge}${transferBadge}</span>
+        <span class="item-block-title">Item${packageBadge}${backOrderBadge}${transferBadge}</span>
         <span class="item-block-id">${esc(it.itemId || it.sku || key)}</span>
       </div>
       ${fieldsHtml}

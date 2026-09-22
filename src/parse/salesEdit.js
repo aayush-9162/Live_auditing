@@ -60,23 +60,36 @@ function readLabels(line, labels) {
   return out;
 }
 
-// First numeric value to the right of `label` on this line. The totals block
-// prints three money columns per row (THIS DELIVERY / ORIG-ORDER / REMAINING)
-// and the first one is the figure for this sale.
-function numberAfterLabel(line, label) {
+// Read a money figure to the right of `label` on this line.
+//
+// The totals block prints the same figure three times, under THIS DELIVERY /
+// ORIG-ORDER / REMAINING. They only differ when part of the sale is back
+// ordered: THIS DELIVERY then covers just what is shipping now, while
+// ORIG-ORDER is the whole sale. The Ticket always describes the whole sale,
+// so `anchorX` points at the ORIG-ORDER column and the figure nearest it
+// wins. Without an anchor (an older layout with one column) take the first.
+function numberAfterLabel(line, label, anchorX = null) {
   const want = label.toUpperCase().split(/\s+/);
-  const tokens = line.cells.map((c) => c.str);
-  const upper = tokens.map((t) => t.toUpperCase());
+  const cells = line.cells;
+  const upper = cells.map((c) => c.str.toUpperCase());
   for (let i = 0; i + want.length <= upper.length; i++) {
     let ok = true;
     for (let k = 0; k < want.length; k++) {
       if (upper[i + k] !== want[k]) { ok = false; break; }
     }
     if (!ok) continue;
-    for (let j = i + want.length; j < tokens.length; j++) {
-      if (isNumeric(tokens[j])) return num(tokens[j]);
+
+    const after = cells.slice(i + want.length).filter((c) => isNumeric(c.str));
+    if (!after.length) return null;
+    if (anchorX == null) return num(after[0].str);
+
+    let best = after[0];
+    let bestDist = Math.abs(after[0].x - anchorX);
+    for (const cell of after.slice(1)) {
+      const d = Math.abs(cell.x - anchorX);
+      if (d < bestDist) { bestDist = d; best = cell; }
     }
-    return null;
+    return num(best.str);
   }
   return null;
 }
@@ -390,7 +403,10 @@ function readMainLine(line, item, anchors) {
 
   const extShip = money.extShip !== undefined ? num(money.extShip) : null;
   const extOrd  = money.extOrd  !== undefined ? num(money.extOrd)  : null;
-  item.sale_price         = extShip !== null ? extShip : (extOrd !== null ? extOrd : item.__unit_price * item.sale_qty);
+  // EXTENDED ORDERED, not TO-SHIP: a back-ordered line ships nothing yet but
+  // the Ticket still carries its full price. Same reasoning as the totals.
+  item.sale_price         = extOrd !== null ? extOrd : (extShip !== null ? extShip : item.__unit_price * item.sale_qty);
+  item.__ext_to_ship      = extShip !== null ? extShip : item.sale_price;
   item.__ext_ordered      = extOrd !== null ? extOrd : item.sale_price;
   item.__discount_pct     = money.disc !== undefined ? num(money.disc) : 0;
   item.sale_unit_cost     = money.unitCost !== undefined ? num(money.unitCost) : 0;
@@ -465,6 +481,14 @@ function parseTotals(lines, from, anchors) {
     ['AMT RECD:', 'amtRecd'], ['DOWN PAYMENT:', 'downPayment'], ['COST:', 'cost'],
   ];
 
+  // x of the ORIG-ORDER column header, so the whole-sale figures are read
+  // rather than the this-delivery ones.
+  let origOrderX = null;
+  for (let i = from; i < lines.length; i++) {
+    const cell = lines[i].cells.find((c) => c.str.toUpperCase() === 'ORIG-ORDER');
+    if (cell) { origOrderX = cell.x; break; }
+  }
+
   for (let i = from; i < lines.length; i++) {
     const line = lines[i];
     const text = line.text.trim();
@@ -503,7 +527,7 @@ function parseTotals(lines, from, anchors) {
 
     for (const [label, key] of MONEY_LABELS) {
       if (totals[key] !== null) continue;
-      const v = numberAfterLabel(line, label);
+      const v = numberAfterLabel(line, label, origOrderX);
       if (v !== null) totals[key] = v;
     }
   }

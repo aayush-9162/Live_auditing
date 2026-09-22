@@ -126,6 +126,8 @@ function normalizeItem(row) {
     isTransfer:   !!row.__transfer,
     // Set on lines that RV allocated out of a package roll-up.
     packageKey:   toStr(row.__package_of),
+    // From the receipt: the line is ordered but not shipping yet.
+    isBackOrdered: !!row.__back_ordered,
   };
 }
 
@@ -249,6 +251,7 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
           g.qty = (Number(g.qty) || 0) + (Number(it.qty) || 0);
           g.extendedPrice = (Number(g.extendedPrice) || 0) + (Number(it.extendedPrice) || 0);
           if (it.isTransfer) g.isTransfer = true;   // any source row transfer → group is transfer
+          if (it.isBackOrdered) g.isBackOrdered = true;
           if (!g.packageKey && it.packageKey) g.packageKey = it.packageKey;
         }
       }

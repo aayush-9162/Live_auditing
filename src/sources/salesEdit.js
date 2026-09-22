@@ -11,8 +11,13 @@ const path = require('path');
 const { getDriveClient, streamPdf } = require('./drive');
 const { extractLines } = require('../parse/pdfLayout');
 const { parseSalesEdit } = require('../parse/salesEdit');
+const { parseRvReceipt } = require('../parse/rvReceipt');
 
 const SUFFIX = 'SALES EDIT';
+// The customer receipt filed beside every SALES EDIT. It states the whole
+// sale's totals unambiguously and marks back-ordered lines, so it is used as
+// a second opinion on the figures.
+const RECEIPT_SUFFIX = 'RV RCPT';
 
 // Parsed reports are cached by file id + modifiedTime, so re-auditing the
 // same invoice doesn't re-download and re-parse the PDF.
@@ -406,8 +411,48 @@ async function fetchSaleForCustomer(customerName) {
   return loadSalesEdit(file);
 }
 
+// --- the RV receipt filed alongside -----------------------------------------
+
+const receiptCache = new Map();
+
+async function findReceiptPdf(saleFile) {
+  if (!saleFile || !saleFile.folderId) return null;
+  const files = await listChildren(saleFile.folderId);
+  return files
+    .filter((f) => !isDir(f) && f.name.toUpperCase().includes(RECEIPT_SUFFIX))
+    .sort((a, b) => String(b.createdTime).localeCompare(String(a.createdTime)))[0] || null;
+}
+
+// Returns null rather than throwing: the receipt is a cross-check, so a sale
+// without one, or one Drive won't release, must not fail the audit.
+async function loadReceiptFor(saleFile) {
+  let file;
+  try {
+    file = await findReceiptPdf(saleFile);
+  } catch (e) {
+    return null;
+  }
+  if (!file || (file.capabilities && file.capabilities.canDownload === false)) return null;
+
+  const key = `${file.id}:${file.modifiedTime || ''}`;
+  if (receiptCache.has(key)) return receiptCache.get(key);
+
+  try {
+    const { pages } = await extractLines(await downloadPdf(file.id));
+    const parsed = { ...parseRvReceipt(pages), file: { id: file.id, name: file.name } };
+    if (receiptCache.size >= CACHE_LIMIT) receiptCache.delete(receiptCache.keys().next().value);
+    receiptCache.set(key, parsed);
+    return parsed;
+  } catch (e) {
+    console.warn(`sales-edit: could not read receipt "${file.name}": ${e.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   searchSalesEditPdfs,
+  findReceiptPdf,
+  loadReceiptFor,
   findSalesEditPdf,
   findViaFolder,
   findInDayFolder,
