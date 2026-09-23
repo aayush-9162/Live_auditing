@@ -14,12 +14,19 @@
 // original order / remaining) and they diverge whenever part of a sale is
 // back ordered, so the receipt is a useful second opinion on the numbers.
 
-const NUMBER_RE = /^-?[\d,]+\.\d{2}$/;
+// Same RV money conventions as the SALES EDIT: ".00" for zero, and negatives
+// with the minus trailing ("172.50-").
+const NUMBER_RE = /^-?(?:[\d,]+\.\d{2}|\.\d{2})-?$/;
 
 function num(s) {
   if (s === null || s === undefined || s === '') return null;
-  const n = Number(String(s).replace(/[$,]/g, ''));
-  return Number.isFinite(n) ? n : null;
+  let str = String(s).trim().replace(/[$,]/g, '');
+  let negative = false;
+  if (str.endsWith('-')) { negative = true; str = str.slice(0, -1); }
+  if (str.startsWith('.')) str = `0${str}`;
+  const n = Number(str);
+  if (!Number.isFinite(n)) return null;
+  return negative ? -n : n;
 }
 
 function clean(s) {

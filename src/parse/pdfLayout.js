@@ -99,4 +99,39 @@ function textBetween(line, x0, x1) {
   return cellsBetween(line, x0, x1).map((c) => c.str).join(' ').replace(/\s+/g, ' ').trim();
 }
 
-module.exports = { extractLines, cellsBetween, textBetween };
+// Split merged text runs back into single words.
+//
+// The same RV report comes out of the PDF writer two different ways: usually
+// each word is its own text run, but sometimes a whole phrase arrives as one
+// ("QTY-ORD QTY-SHP QTY-BO ITEM-ID", "TERMS: COLLECT ON DELIVERY"). Anything
+// that locates a field by matching a cell against a word then fails on the
+// merged form, so normalise to one word per cell up front.
+//
+// The reports are monospace, so a word's x is its character offset scaled
+// across the run's width. `text` is left alone — it already renders correctly
+// either way, and the words keep their original positions.
+function splitWords(pages) {
+  return pages.map((page) => ({
+    ...page,
+    lines: page.lines.map((line) => {
+      if (!line.cells.some((c) => /\s/.test(c.str.trim()))) return line;
+      const cells = [];
+      for (const cell of line.cells) {
+        if (!/\s/.test(cell.str.trim())) { cells.push(cell); continue; }
+        const perChar = cell.str.length ? (cell.xEnd - cell.x) / cell.str.length : 0;
+        const re = /\S+/g;
+        let m;
+        while ((m = re.exec(cell.str)) !== null) {
+          cells.push({
+            x: cell.x + perChar * m.index,
+            xEnd: cell.x + perChar * (m.index + m[0].length),
+            str: m[0],
+          });
+        }
+      }
+      return { ...line, cells: cells.sort((a, b) => a.x - b.x) };
+    }),
+  }));
+}
+
+module.exports = { extractLines, cellsBetween, textBetween, splitWords };

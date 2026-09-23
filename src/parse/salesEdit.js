@@ -6,17 +6,26 @@
 // x coordinate of the column header above it rather than by counting spaces,
 // so a change in page margins or font metrics doesn't break the read.
 
-const { cellsBetween, textBetween } = require('./pdfLayout');
+const { cellsBetween, textBetween, splitWords } = require('./pdfLayout');
 const { termsCodeFor, deliveryViaCodeFor } = require('../match/rvCodes');
 
-const NUMBER_RE = /^-?[\d,]+(?:\.\d+)?$/;
+// RV writes money the way its report writer always has: zero and sub-unit
+// amounts lose the leading digit (".00", ".32") and negatives carry the minus
+// on the RIGHT ("277.8-", "100.0-"). Both forms have to count as numbers, or
+// half the reports come out with totals silently reading as zero.
+const NUMBER_RE = /^-?(?:[\d,]+(?:\.\d+)?|\.\d+)-?$/;
 const UOM_RE    = /^(EA|EACH|PR|SET|PC|PCS)$/i;
 const CSZ_RE    = /^(.+?),\s*([A-Za-z]{2})\.?\s+(\d{5}(?:-\d{4})?)$/;
 
 function num(s) {
   if (s === null || s === undefined || s === '') return 0;
-  const n = Number(String(s).replace(/[$,%]/g, ''));
-  return Number.isFinite(n) ? n : 0;
+  let str = String(s).trim().replace(/[$,%]/g, '');
+  let negative = false;
+  if (str.endsWith('-')) { negative = true; str = str.slice(0, -1); }
+  if (str.startsWith('.')) str = `0${str}`;
+  const n = Number(str);
+  if (!Number.isFinite(n)) return 0;
+  return negative ? -n : n;
 }
 
 function isNumeric(s) {
@@ -233,8 +242,14 @@ function parseCustomerBlock(lines, startIdx, endIdx) {
   const billing = readAddressColumn(billParts);
   const shipping = readAddressColumn(shipParts);
 
+  // Some reports print a revision number after the sale number
+  // ("SALES-NO: 1300680  1"); the sale number is the first of the two.
+  const salesNoRaw = clean(ids['SALES-NO:']);
+  const salesNoParts = salesNoRaw.split(/\s+/).filter(Boolean);
+
   return {
-    salesNo: clean(ids['SALES-NO:']),
+    salesNo: salesNoParts[0] || salesNoRaw,
+    salesNoSuffix: salesNoParts.slice(1).join(' '),
     customerId: clean(ids['CUS-ID:']),
     profitCenter,
     phones: { cell, home, other },
@@ -415,11 +430,40 @@ function readMainLine(line, item, anchors) {
 
 // ---------------------------------------------------------------------------
 
-function parseSalesEdit(pages) {
+// Every page repeats a banner: the run timestamp / company / "Page n of m"
+// row, then the report title with a space between every letter. On a
+// multi-page report an item block can straddle the break — its id row at the
+// foot of one page, its quantity row at the head of the next — and the banner
+// lands between them, where it gets read as that item's own row. Drop it.
+function isPageBanner(line) {
+  const text = line.text.trim();
+  if (!text) return true;
+  if (/^\d{2}\/\d{2}\/\d{2}\s/.test(text)
+      && /Carolina Furniture Concepts|Page\s+\d+\s+of\s+\d+/i.test(text)) return true;
+  // "S A L E S   E D I T   L I S T" / "D E T A I L" — every cell one letter.
+  if (line.cells.length >= 4 && line.cells.every((c) => c.str.trim().length <= 1)) return true;
+  return false;
+}
+
+function parseSalesEdit(rawPages) {
+  // Every field below is located by matching a cell against a word, so the
+  // merged-run form of the report has to be normalised first.
+  const pages = splitWords(rawPages);
   const lines = [];
+  let seenColumnHeader = false;
   for (const page of pages) {
     for (const line of page.lines) {
-      if (line.cells.length) lines.push(line);
+      if (!line.cells.length) continue;
+      if (isPageBanner(line)) continue;
+      // Continuation pages may repeat the item column header; keep the first
+      // (the anchors come from it) and drop the rest so they can't be read as
+      // item rows.
+      const isColumnHeader = line.cells.some((c) => c.str.toUpperCase() === 'QTY-ORD');
+      if (isColumnHeader) {
+        if (seenColumnHeader) continue;
+        seenColumnHeader = true;
+      }
+      lines.push(line);
     }
   }
 
@@ -676,7 +720,8 @@ function buildRows({ customer, info, items, totals, salesperson, remarks, cashBr
     const row = { ...it, sale_profit_ctr: customer.profitCenter };
     if (it.__is_package) {
       row.__package_item_id = it.sale_item;
-      row.sale_item = `*PKG${it.sale_item}`;
+      // Some reports already print "*PKG" as the item id; don't double it up.
+      row.sale_item = /^\*PKG/i.test(it.sale_item) ? it.sale_item : `*PKG${it.sale_item}`;
     }
     return row;
   });
