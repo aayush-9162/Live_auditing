@@ -1,7 +1,24 @@
 const $ = (sel) => document.querySelector(sel);
 
+// Identifies this browser to the server. A manually supplied SALES EDIT is
+// held against this id, so it is visible only here and never becomes another
+// auditor's source of truth.
+function sessionId() {
+  let id = null;
+  try { id = localStorage.getItem('sa-session'); } catch (e) { /* private mode */ }
+  if (!id) {
+    id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    try { localStorage.setItem('sa-session', id); } catch (e) { /* per-tab then */ }
+  }
+  return id;
+}
+
 async function getJSON(url, opts) {
-  const res = await fetch(url, opts);
+  const res = await fetch(url, {
+    ...opts,
+    headers: { ...((opts && opts.headers) || {}), 'X-Session-Id': sessionId() },
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { data });
   return data;
@@ -247,6 +264,7 @@ function rvSourceError(data) {
       <div style="margin-top:8px;">${esc(data.error || '')}</div>
       ${fileLine}
       <div style="margin-top:10px;">Fix: give the account the app signs in as <b>Content manager</b> on that shared drive, or turn off the “viewers cannot download” restriction for it.</div>
+      ${uploadControl(data)}
     </div>`;
   }
 
@@ -256,6 +274,7 @@ function rvSourceError(data) {
       <div style="margin-top:8px;">${esc(data.error || '')}</div>
       ${fileLine}
       <div style="margin-top:10px;">The file may be a different report, a scan with no text layer, or a layout this parser hasn't seen.</div>
+      ${uploadControl(data)}
     </div>`;
   }
 
@@ -279,7 +298,62 @@ function rvSourceError(data) {
     </ul>
     <div style="margin-top:10px;"><b>Likely reasons:</b></div>
     <ul style="margin:6px 0 0 18px;">${reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+    ${uploadControl(data)}
   </div>`;
+}
+
+// Let an auditor supply the report by hand when Drive can't. The file is sent
+// as raw bytes — no multipart, no extra dependency — and the server parses it
+// before accepting, so a wrong PDF is refused here rather than later.
+function uploadControl(data) {
+  const id = (data.json && data.json.id) || '';
+  const date = data.date || '';
+  if (!id || !date) return '';
+  return `
+    <div class="upload-box">
+      <div class="upload-title">Have the SALES EDIT PDF? Upload it and this sale will be audited against it.</div>
+      <div class="upload-note">Only you will see it, and only on this browser. It is held in memory for a few hours and never saved to Drive or shared with other auditors.</div>
+      <div class="upload-row">
+        <input type="file" id="seFile" accept="application/pdf,.pdf" />
+        <button id="seUpload" class="primary small-btn">Upload &amp; compare</button>
+      </div>
+      <div id="seUploadMsg" class="upload-msg"></div>
+    </div>`;
+}
+
+function wireUploadControl() {
+  const btn = document.getElementById('seUpload');
+  const input = document.getElementById('seFile');
+  const msg = document.getElementById('seUploadMsg');
+  if (!btn || !input) return;
+
+  btn.addEventListener('click', async () => {
+    const file = input.files && input.files[0];
+    if (!file) { msg.textContent = 'Choose a PDF first.'; msg.className = 'upload-msg warn'; return; }
+    const d = currentAuditData || {};
+    const date = d.date || $('#date').value;
+    const invoiceId = d.json && d.json.id;
+    btn.disabled = true;
+    msg.className = 'upload-msg';
+    msg.textContent = `Reading ${file.name}…`;
+    try {
+      const res = await fetch(
+        `/api/sales-edit-upload?date=${encodeURIComponent(date)}&invoiceId=${encodeURIComponent(invoiceId)}&filename=${encodeURIComponent(file.name)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/pdf', 'X-Session-Id': sessionId() }, body: file },
+      );
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      msg.className = 'upload-msg ok';
+      msg.textContent = `Accepted — sale #${out.salesNo}, ${out.customerName}. Comparing…`;
+      auditStatus.delete(invoiceId);
+      const el = document.querySelector(`.invoice-item[data-id="${invoiceId}"]`);
+      await audit(invoiceId, el || document.createElement('div'));
+    } catch (e) {
+      msg.className = 'upload-msg warn';
+      msg.textContent = e.message;
+      btn.disabled = false;
+    }
+  });
 }
 
 let currentAuditData = null;
@@ -288,10 +362,12 @@ function renderAudit(data) {
   currentAuditData = data;
   if (data.ok === false) {
     $('#result').innerHTML = rvSourceError(data);
+    wireUploadControl();
     return;
   }
   if (!data.matched) {
     $('#result').innerHTML = rvSourceError({ ...data, stage: 'drive-search' });
+    wireUploadControl();
     return;
   }
 
@@ -333,6 +409,12 @@ function renderAudit(data) {
   // so when the label wasn't one this app knows how to translate.
   // The Drive folder name carries the sale number; disagreeing with the PDF
   // means the search resolved to the wrong file.
+  // Audited against a hand-supplied report rather than anything on Drive —
+  // worth stating plainly, with a way back to the Drive lookup.
+  const uploadBanner = data.manualUpload
+    ? `<div class="banner" style="margin-bottom:14px;background:var(--surface);border-color:var(--border-soft);"><b>Using a SALES EDIT you uploaded.</b> Compared against <code>${esc((data.driveFile && data.driveFile.name) || 'an uploaded PDF')}</code> — visible only to you, on this browser, and discarded on its own. <button id="seRemove" class="ghost small-btn" style="margin-left:8px;">Remove and search Drive again</button></div>`
+    : '';
+
   const folderBanner = data.salesNoMatchesFolder === false
     ? `<div class="banner error" style="margin-bottom:14px;"><b>Wrong file?</b> The Drive folder is numbered <code>${esc(data.folderSalesNo)}</code> but the PDF inside it reports sale <code>${esc(mssql.salesNo)}</code>. Check the file before trusting this audit.</div>`
     : '';
@@ -367,6 +449,7 @@ function renderAudit(data) {
 
     ${noTaxBanner}
     ${fuzzyBanner}
+    ${uploadBanner}
     ${folderBanner}
     ${receiptBanner}
     ${viaBanner}
@@ -416,6 +499,23 @@ function renderAudit(data) {
     if (!name) return;
     window.open(`/api/customer-pdf?name=${encodeURIComponent(name)}`, '_blank', 'noopener');
   });
+  const removeBtn = document.getElementById('seRemove');
+  if (removeBtn) removeBtn.addEventListener('click', async () => {
+    const d = currentAuditData || {};
+    const date = d.date || $('#date').value;
+    const invoiceId = d.json && d.json.id;
+    removeBtn.disabled = true;
+    try {
+      await fetch(`/api/sales-edit-upload?date=${encodeURIComponent(date)}&invoiceId=${encodeURIComponent(invoiceId)}`,
+        { method: 'DELETE', headers: { 'X-Session-Id': sessionId() } });
+      auditStatus.delete(invoiceId);
+      const el = document.querySelector(`.invoice-item[data-id="${invoiceId}"]`);
+      await audit(invoiceId, el || document.createElement('div'));
+    } catch (e) {
+      removeBtn.disabled = false;
+    }
+  });
+
   const toggleBtn = document.getElementById('toggleMatched');
   if (toggleBtn) toggleBtn.addEventListener('click', () => {
     hideMatchedRows = !hideMatchedRows;

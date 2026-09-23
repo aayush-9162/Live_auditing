@@ -4,7 +4,12 @@ const express = require('express');
 
 const { fetchInvoicesByDate } = require('./src/sources/invoices');
 const { findCustomerPdf, streamPdf } = require('./src/sources/drive');
-const { findSalesEditPdf, loadSalesEdit, loadReceiptFor } = require('./src/sources/salesEdit');
+const {
+  findSalesEditPdf, loadSalesEdit, loadReceiptFor,
+  saveSessionUpload, removeSessionUpload,
+} = require('./src/sources/salesEdit');
+const { extractLines } = require('./src/parse/pdfLayout');
+const { parseSalesEdit } = require('./src/parse/salesEdit');
 const { normalizeInvoice } = require('./src/normalize/fromJson');
 const { normalizeMssqlRows } = require('./src/normalize/fromMssql');
 const { toFirstLast, namesLooseMatch } = require('./src/match/name');
@@ -51,6 +56,12 @@ function daysBetween(a, b) {
   const t2 = Date.parse(b);
   if (Number.isNaN(t1) || Number.isNaN(t2)) return 0;
   return Math.abs(Math.round((t2 - t1) / 86400000));
+}
+
+// Identifies the browser, so a manually supplied SALES EDIT stays private to
+// whoever uploaded it instead of becoming everyone's source of truth.
+function sessionOf(req) {
+  return String(req.get('X-Session-Id') || req.query.session || '').trim().slice(0, 80);
 }
 
 // Which store wrote the ticket — picks the Drive day folder to look in.
@@ -138,6 +149,68 @@ app.get('/api/sale-pdf', async (req, res) => {
     console.error('sale-pdf error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- Manually supplied SALES EDIT --------------------------------------------
+//
+// For a sale whose report never reached Drive, or sits on the archive drive
+// that refuses downloads, an auditor can upload the PDF themselves. The bytes
+// are POSTed raw (Content-Type: application/pdf) so no multipart parser is
+// needed. The file is parsed before it is kept — a wrong document is rejected
+// here rather than breaking every later audit.
+app.post('/api/sales-edit-upload',
+  express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '25mb' }),
+  async (req, res) => {
+    const date = String(req.query.date || '').trim();
+    const invoiceId = String(req.query.invoiceId || '').trim();
+    const originalName = String(req.query.filename || '').trim();
+    const sessionId = sessionOf(req);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d+$/.test(invoiceId)) {
+      return res.status(400).json({ error: 'date=YYYY-MM-DD and invoiceId required' });
+    }
+    if (!sessionId) return res.status(400).json({ error: 'missing session — reload the page and try again' });
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || !body.length) {
+      return res.status(400).json({ error: 'no file received' });
+    }
+    if (body.slice(0, 5).toString('latin1') !== '%PDF-') {
+      return res.status(400).json({ error: 'that file is not a PDF' });
+    }
+
+    let parsed;
+    try {
+      const { pages } = await extractLines(body);
+      parsed = parseSalesEdit(pages);
+    } catch (err) {
+      return res.status(400).json({
+        error: `that PDF does not read as a SALES EDIT report — ${err.message}`,
+      });
+    }
+
+    try {
+      const file = saveSessionUpload(sessionId, date, invoiceId, body, originalName);
+      console.log(`sales-edit: session upload for invoice ${invoiceId} on ${date} (sale ${parsed.header.SalesNo})`);
+      res.json({
+        ok: true,
+        file: { name: file.name, uploadedAt: file.createdTime, expiresAt: file.expiresAt },
+        salesNo: parsed.header.SalesNo,
+        customerName: parsed.header.CustomerName,
+        saleDate: parsed.header.SaleDate,
+        itemCount: parsed.items.length,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+// Drop this browser's upload so the sale goes back to being looked up on Drive.
+app.delete('/api/sales-edit-upload', (req, res) => {
+  const date = String(req.query.date || '').trim();
+  const invoiceId = String(req.query.invoiceId || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d+$/.test(invoiceId)) {
+    return res.status(400).json({ error: 'date=YYYY-MM-DD and invoiceId required' });
+  }
+  res.json({ ok: true, removed: removeSessionUpload(sessionOf(req), date, invoiceId) });
 });
 
 // --- Source A: invoices-archive (Node app) -----------------------------------
@@ -251,7 +324,9 @@ app.get('/api/audit', async (req, res) => {
 
     let file;
     try {
-      file = await findSalesEditPdf(lookupName, { store: storeOf(rec), date });
+      file = await findSalesEditPdf(lookupName, {
+        store: storeOf(rec), date, invoiceId: jsonNorm.id, sessionId: sessionOf(req),
+      });
     } catch (e) {
       return res.json({
         ok: false,
@@ -381,6 +456,8 @@ app.get('/api/audit', async (req, res) => {
       driveFile: sale.file,
       itemRowCount: itemRows.length,
       reportedLineItems: header.__line_item_count,
+      manualUpload: Boolean(sale.file && sale.file.uploaded),
+      manualUploadExpiresAt: (sale.file && sale.file.expiresAt) || null,
       fuzzyNameMatched: !match.nameOk,
       matchConfidence: match,
       dateOffDays,

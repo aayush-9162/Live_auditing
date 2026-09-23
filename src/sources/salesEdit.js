@@ -69,6 +69,69 @@ async function searchSalesEditPdfs(customerName, { limit = 10 } = {}) {
     .map((x) => x.f);
 }
 
+// --- manually supplied reports (private to one browser, temporary) ---------
+//
+// When a sale has no SALES EDIT on Drive an auditor can supply the PDF
+// themselves. It is deliberately NOT written to disk and NOT shared: several
+// people use this tool at once, and one person's stand-in document must not
+// become everyone else's source of truth. Uploads live in memory, keyed by the
+// browser that sent them, and expire on their own.
+
+const UPLOAD_TTL_MS = Number(process.env.SALES_EDIT_UPLOAD_TTL_MS) || 4 * 60 * 60 * 1000;
+const UPLOAD_LIMIT = 50;
+const sessionUploads = new Map();   // "session|date|invoiceId" -> { buffer, name, at }
+
+function uploadKey(sessionId, date, invoiceId) {
+  const sid = String(sessionId || '').trim();
+  const d = String(date || '').trim();
+  const id = String(invoiceId == null ? '' : invoiceId).trim();
+  if (!sid || !/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d+$/.test(id)) return null;
+  return `${sid}|${d}|${id}`;
+}
+
+function sweepUploads() {
+  const cutoff = Date.now() - UPLOAD_TTL_MS;
+  for (const [key, entry] of sessionUploads) {
+    if (entry.at < cutoff) sessionUploads.delete(key);
+  }
+}
+
+function findSessionUpload(sessionId, date, invoiceId) {
+  const key = uploadKey(sessionId, date, invoiceId);
+  if (!key) return null;
+  sweepUploads();
+  const entry = sessionUploads.get(key);
+  if (!entry) return null;
+  return {
+    id: `upload:${key}`,
+    name: entry.name || 'uploaded SALES EDIT.pdf',
+    createdTime: new Date(entry.at).toISOString(),
+    modifiedTime: new Date(entry.at).toISOString(),
+    webViewLink: null,
+    buffer: entry.buffer,
+    uploaded: true,
+    expiresAt: new Date(entry.at + UPLOAD_TTL_MS).toISOString(),
+    capabilities: { canDownload: true },
+  };
+}
+
+function saveSessionUpload(sessionId, date, invoiceId, buffer, name = '') {
+  const key = uploadKey(sessionId, date, invoiceId);
+  if (!key) throw Object.assign(new Error('session, date and invoiceId required'), { code: 'BAD_KEY' });
+  sweepUploads();
+  // Oldest out first if someone leaves a lot of these open.
+  while (sessionUploads.size >= UPLOAD_LIMIT) {
+    sessionUploads.delete(sessionUploads.keys().next().value);
+  }
+  sessionUploads.set(key, { buffer, name: String(name || '').slice(0, 200), at: Date.now() });
+  return findSessionUpload(sessionId, date, invoiceId);
+}
+
+function removeSessionUpload(sessionId, date, invoiceId) {
+  const key = uploadKey(sessionId, date, invoiceId);
+  return key ? sessionUploads.delete(key) : false;
+}
+
 // Local override. Sales older than a couple of days move to an archive shared
 // drive that blocks downloads, so point SALES_EDIT_LOCAL_DIR at a folder of
 // hand-downloaded PDFs to audit those. Live sales come straight off Drive and
@@ -291,7 +354,13 @@ function salesNoFromFolderName(folderName) {
 // `store` ("arden" | "waynesville") and `date` (YYYY-MM-DD) come off the
 // Ticket and point straight at the day folder. Without them the day-folder
 // step is skipped and the flat roots do the work.
-async function findSalesEditPdf(customerName, { store = '', date = '' } = {}) {
+async function findSalesEditPdf(customerName, { store = '', date = '', invoiceId = null, sessionId = '' } = {}) {
+  // A file this browser supplied for this invoice wins over everything: it is
+  // an explicit decision about which report belongs to this ticket. Other
+  // people's audits are unaffected — the upload is scoped to the session.
+  const uploaded = findSessionUpload(sessionId, date, invoiceId);
+  if (uploaded) return uploaded;
+
   const local = findLocalSalesEdit(customerName);
   if (local) return local;
 
@@ -352,7 +421,7 @@ async function loadSalesEdit(file) {
 
   let buffer;
   try {
-    buffer = file.localPath ? fs.readFileSync(file.localPath) : await downloadPdf(file.id);
+    buffer = file.buffer || (file.localPath ? fs.readFileSync(file.localPath) : await downloadPdf(file.id));
   } catch (e) {
     const status = e.response && e.response.status;
     if (status === 403) {
@@ -391,6 +460,8 @@ async function loadSalesEdit(file) {
       createdTime: file.createdTime,
       webViewLink: file.webViewLink,
       local: Boolean(file.localPath),
+      uploaded: Boolean(file.uploaded),
+      expiresAt: file.expiresAt || null,
       folderName,
       // The folder is named after the sale, so its number is an independent
       // check on the one printed inside the PDF.
@@ -451,6 +522,9 @@ async function loadReceiptFor(saleFile) {
 
 module.exports = {
   searchSalesEditPdfs,
+  saveSessionUpload,
+  removeSessionUpload,
+  findSessionUpload,
   findReceiptPdf,
   loadReceiptFor,
   findSalesEditPdf,
