@@ -330,6 +330,7 @@ app.get('/api/audit', async (req, res) => {
     } catch (e) {
       return res.json({
         ok: false,
+        date,
         stage: 'drive-search',
         lookupName,
         error: `Google Drive search failed: ${e.message}`,
@@ -339,6 +340,7 @@ app.get('/api/audit', async (req, res) => {
     if (!file) {
       return res.json({
         ok: false,
+        date,
         stage: 'drive-search',
         lookupName,
         error: `No "${lookupName} SALES EDIT.pdf" found on Google Drive.`,
@@ -352,6 +354,7 @@ app.get('/api/audit', async (req, res) => {
     } catch (e) {
       return res.json({
         ok: false,
+        date,
         stage: e.code === 'DRIVE_DOWNLOAD_BLOCKED' ? 'drive-download' : 'pdf-parse',
         lookupName,
         driveFile: { id: file.id, name: file.name, createdTime: file.createdTime, webViewLink: file.webViewLink },

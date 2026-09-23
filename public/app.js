@@ -307,7 +307,9 @@ function rvSourceError(data) {
 // before accepting, so a wrong PDF is refused here rather than later.
 function uploadControl(data) {
   const id = (data.json && data.json.id) || '';
-  const date = data.date || '';
+  // Fall back to the date picker: this box exists precisely for the responses
+  // that failed, and one of them dropping a field shouldn't hide it.
+  const date = data.date || ($('#date') && $('#date').value) || '';
   if (!id || !date) return '';
   return `
     <div class="upload-box">
