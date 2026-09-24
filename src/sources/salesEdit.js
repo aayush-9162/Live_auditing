@@ -249,15 +249,76 @@ function nameTokens(s) {
   return String(s || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter(Boolean);
 }
 
+// How well a folder name matches a customer, 3 (best) down to 0 (no match).
+//
 // Folders are named "<sale no> <CUSTOMER NAME>", sometimes with a year in
-// front or a note after ("1309130 PAT CROWLEY Hold for Esign"). Require every
-// part of the customer's name as a whole word so "Ann Smith" can't match
-// "Maryann Smithson".
-function folderMatchesCustomer(folderName, customerName) {
+// front or a note after ("1309130 PAT CROWLEY Hold for Esign"). The two
+// systems don't always spell the name the same way: the Ticket may carry a
+// middle initial or middle name that RV drops, as in Ticket "Melody H Glover"
+// against Drive "1308670 MELODY GLOVER".
+//
+// Matching is always on whole words, so "Ann Smith" can't match "Maryann
+// Smithson", and the score lets a stricter match win when several folders
+// qualify.
+function nameMatchScore(folderName, customerName) {
   const want = nameTokens(customerName);
-  if (!want.length) return false;
+  if (!want.length) return 0;
   const have = new Set(nameTokens(folderName));
-  return want.every((t) => have.has(t));
+
+  // 3 — every part of the name is there.
+  if (want.every((t) => have.has(t))) return 3;
+
+  // 2 — everything but the initials, so a middle initial on one side only
+  //     still matches.
+  const named = want.filter((t) => t.length > 1);
+  if (named.length && named.every((t) => have.has(t))) return 2;
+
+  // 1 — surname plus at least one given name. Covers a middle name one side
+  //     is missing ("Sherry Willis Hanson" / "SHERRY HANSON") and a joint
+  //     ticket filed under one person ("Mark And Amy Gartman" / "AMY GARTMAN").
+  const last = want[want.length - 1];
+  if (want.length >= 2 && have.has(last)
+      && want.slice(0, -1).some((t) => have.has(t))) return 1;
+
+  return 0;
+}
+
+// Surname-only match, for a first name the two systems disagree on entirely —
+// a nickname, most often ("Kathy Potts" on the Ticket, "KATHLEEN POTTS" in
+// RV). Too weak to trust on its own, so it is used only when exactly one
+// candidate carries the surname, and the audit's own name check still warns.
+function surnameOnlyCandidates(items, customerName) {
+  const want = nameTokens(customerName);
+  const last = want[want.length - 1];
+  if (!last || last.length < 3) return [];
+  const hits = items.filter((f) => new Set(nameTokens(f.name)).has(last));
+  return hits.length === 1 ? hits : [];
+}
+
+// Candidates for a customer, best match first. Falls back to the surname when
+// nothing matches outright and the surname points at exactly one sale.
+function pickCandidates(items, customerName) {
+  const matched = items
+    .filter((f) => nameMatchScore(f.name, customerName) > 0)
+    .sort(byNameThenRecency(customerName));
+  if (matched.length) return matched;
+
+  const fallback = surnameOnlyCandidates(items, customerName);
+  if (fallback.length) {
+    console.log(`sales-edit: "${customerName}" matched "${fallback[0].name}" on surname alone`);
+  }
+  return fallback;
+}
+
+function folderMatchesCustomer(folderName, customerName) {
+  return nameMatchScore(folderName, customerName) > 0;
+}
+
+// Best match first, then newest, so a repeat customer resolves to their most
+// recent sale and an exact name beats a partial one.
+function byNameThenRecency(customerName) {
+  return (a, b) => (nameMatchScore(b.name, customerName) - nameMatchScore(a.name, customerName))
+    || String(b.createdTime).localeCompare(String(a.createdTime));
 }
 
 function salesEditPdfs(files, customerName) {
@@ -310,11 +371,10 @@ async function findInDayFolder(customerName, store, date, opts = {}) {
 
   const kids = await listChildren(folder.id, opts);
 
-  const loose = salesEditPdfs(kids, customerName)
-    .filter((f) => folderMatchesCustomer(f.name, customerName))[0];
+  const loose = pickCandidates(salesEditPdfs(kids, customerName), customerName)[0];
   if (loose) return { ...loose, folderName: folder.name, dayFolder: folder.name };
 
-  for (const sub of kids.filter(isDir).filter((f) => folderMatchesCustomer(f.name, customerName))) {
+  for (const sub of pickCandidates(kids.filter(isDir), customerName)) {
     const hit = salesEditPdfs(await listChildren(sub.id, opts), customerName)[0];
     if (hit) return { ...hit, folderId: sub.id, folderName: sub.name, dayFolder: folder.name };
   }
@@ -332,9 +392,7 @@ async function findViaFolder(customerName, opts = {}) {
       console.warn(`sales-edit: could not list root ${root}: ${e.message}`);
     }
   }
-  folders.sort((a, b) => String(b.createdTime).localeCompare(String(a.createdTime)));
-
-  for (const folder of folders.filter((f) => folderMatchesCustomer(f.name, customerName))) {
+  for (const folder of pickCandidates(folders, customerName)) {
     const hit = salesEditPdfs(await listChildren(folder.id, opts), customerName)[0];
     if (hit) return { ...hit, folderId: folder.id, folderName: folder.name };
   }
