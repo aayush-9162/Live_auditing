@@ -1,5 +1,5 @@
 const { namesMatch } = require('../match/name');
-const { addressEqual } = require('../match/address');
+const { addressEqual, canonicalAddress } = require('../match/address');
 const { expectedDeliveryVia } = require('../match/deliveryVia');
 
 function eqStr(a, b) {
@@ -11,9 +11,12 @@ function eqAddr(a, b) {
 }
 
 // Like eqStr but treats hyphens, periods, and other punctuation as spaces.
-// Useful for city names like "Fuquay-Varina" vs "Fuquay Varina".
+// Useful for city names like "Fuquay-Varina" vs "Fuquay Varina". Words are
+// also reduced to their standard short forms, the same as street addresses,
+// so "Mt Airy" matches "Mount Airy" and "N Wilkesboro" matches "North
+// Wilkesboro".
 function eqCity(a, b) {
-  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const norm = (s) => canonicalAddress(String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' '));
   return norm(a) === norm(b);
 }
 
@@ -432,4 +435,11 @@ function compare(jsonInvoice, mssqlRecord) {
   };
 }
 
-module.exports = { compare };
+module.exports = {
+  compare,
+  // Shared with the return-ticket audit so both judge items the same way.
+  internals: {
+    eqStr, eqNum, pushDiff, diffCustomer, diffItems,
+    normalizeItemId, itemKey, itemLabel, productBag, bagsEqual,
+  },
+};

@@ -31,6 +31,32 @@ const STREET_TYPES = {
   plaza: 'plz',  plz: 'plz',
   expressway: 'expy', expy: 'expy',
   bypass: 'byp', byp: 'byp',
+
+  // The rest of the "Common Street Name Sign Abbreviations" sheet the office
+  // works from. Rows already covered above (Avenue, Road, Trail = TR, ...) and
+  // rows whose short form is the word itself (Alley, Hill, Way) need nothing
+  // here. Two short forms follow the sheet rather than the USPS list, where
+  // BR is Branch and PT is Point — so "Branch" and "Point" are left alone.
+  bridge: 'br',          br: 'br',
+  canyon: 'cyn',         cyn: 'cyn',
+  center: 'ctr',         ctr: 'ctr',
+  crescent: 'cres',      cres: 'cres',
+  expwy: 'expy',
+  freeway: 'fwy',        fwy: 'fwy',
+  information: 'info',   info: 'info',
+  international: 'intl', intl: 'intl',
+  island: 'isl',         isl: 'isl',
+  junction: 'jct',       jct: 'jct',
+  lake: 'lk',            lk: 'lk',
+  lp: 'loop',
+  mount: 'mt',           mt: 'mt',
+  mountain: 'mtn',       mtn: 'mtn',
+  national: 'natl',      natl: 'natl',
+  port: 'pt',            pt: 'pt',
+  river: 'r',            r: 'r',
+  route: 'rte',          rte: 'rte',
+  thruway: 'thwy',       thwy: 'thwy',
+  turnpike: 'tpk',       tpk: 'tpk',
 };
 
 const DIRECTIONALS = {

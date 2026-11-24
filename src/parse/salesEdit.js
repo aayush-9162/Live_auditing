@@ -612,16 +612,28 @@ function linkPackageMembers(rows) {
 
 // RV records a pickup's delivery-date field as the literal "ASAP" even when a
 // date has been agreed; the date itself is typed into the sales remarks, as in
-// "NOT CLEAR for Pickup. Pickup Date - 09-26-2026." Recover it so the audit
-// compares against a date rather than the ASAP marker.
+// "NOT CLEAR for Pickup. Pickup Date - 09-26-2026." or
+// "CLEAR for Pickup on 11/25/2026 from Waynesville Location." Recover it so
+// the audit compares against a date rather than the ASAP marker.
+//
+// The date must follow the keyword directly, separated only by punctuation
+// and filler words ("date", "on", "scheduled for", ...), so an unrelated date
+// elsewhere in the remarks is never mistaken for the pickup date.
+const REMARKS_DATE_RE = new RegExp(
+  '\\b(?:pick\\s*-?\\s*up|delivery)\\b' +
+  '(?:[\\s\\-:.,]|\\b(?:date|on|for|by|is|at|will|be|scheduled|set)\\b)*' +
+  '(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{4}|\\d{2})(?!\\d)',
+  'gi',
+);
+
 function pickupDateFromRemarks(text) {
-  const m = String(text || '').match(
-    /\b(?:pick\s*-?\s*up|delivery)\s*date\b\s*[-:.]?\s*(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/i,
-  );
-  if (!m) return '';
-  const [, mm, dd, yy] = m;
-  const year = yy.length === 2 ? `20${yy}` : yy;
-  return `${year}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  for (const m of String(text || '').matchAll(REMARKS_DATE_RE)) {
+    const [, mm, dd, yy] = m;
+    if (Number(mm) < 1 || Number(mm) > 12 || Number(dd) < 1 || Number(dd) > 31) continue;
+    const year = yy.length === 2 ? `20${yy}` : yy;
+    return `${year}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  }
+  return '';
 }
 
 // Shape the parsed report the way the MSSQL source used to: a salesopendaily

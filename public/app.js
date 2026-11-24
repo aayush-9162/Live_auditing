@@ -152,7 +152,7 @@ function renderInvoices(list) {
           <span>${esc(inv.name || '—')}</span>
           <span class="iv-total">$${num(inv.total)}</span>
         </div>
-        <div class="iv-sub">${esc(inv.city)}, ${esc(inv.state)} · ${esc(inv.invoiceType)} · ${esc(inv.orderDate)}</div>
+        <div class="iv-sub">${esc(inv.city)}, ${esc(inv.state)} · ${esc(inv.invoiceType)} · ${esc(inv.orderDate)}${String(inv.transactionMode || '').toUpperCase() === 'RETURN' ? ' · <span class="opt-tag tag-return" title="Return ticket — only the returned / added lines and the sale total are checked">Return</span>' : ''}</div>
         <div class="iv-foot">
           <span class="iv-sale-no" data-sale-for="${inv.id}">${renderSaleNo(inv.id)}</span>
           <span class="iv-status" data-status-for="${inv.id}">${renderStatus(inv.id)}</span>
@@ -380,9 +380,17 @@ function renderAudit(data) {
 
   const diffSet = new Set(diffs.map((d) => `${d.group}/${d.field}`));
 
+  // A return ticket is judged on its own lines in the return panel, so the
+  // side cards drop the item lists (which would read as the whole sale being
+  // missing) and keep only the rows a return is actually checked on.
+  const ret = data.returnAudit || null;
+  const cardJson = ret ? { ...json, items: [], packages: [] } : json;
+  const cardRv   = ret ? { ...mssql, items: [], packages: [] } : mssql;
+  const cardView = ret ? { hideItems: true, onlyKeys: returnRowKeys(ret.mode) } : {};
+
   // Compute a stable item ordering: JSON's items first (in order), then any
   // RV-only items at the end. Both side cards render this same sequence.
-  const itemOrder = computeItemOrder(json.items, mssql.items);
+  const itemOrder = computeItemOrder(cardJson.items, cardRv.items);
   // Rows a package already accounts for. The Ticket books the package on one
   // line and RV explodes it into components, so each side is legitimately
   // missing the other's rows — showing "(not on this side)" for them reads as
@@ -428,6 +436,41 @@ function renderAudit(data) {
     ? `<div class="banner warn" style="margin-bottom:14px;"><b>Totals taken from the RV receipt.</b> The SALES EDIT and the receipt disagreed on ${corrections.map((c) => `<code>${esc(c.field)}</code> ($${num(c.salesEdit)} vs $${num(c.receipt)})`).join(', ')}. The receipt states the whole sale, so its figures were used.</div>`
     : '';
 
+  // RV prints a sale again each time it changes after the first filing. The
+  // newest print is the one audited, so say so — it is why a sale can differ
+  // from a ticket that was right on the day.
+  const localDate = (iso) => {
+    const t = new Date(iso);
+    return Number.isNaN(t.getTime()) ? '' : t.toLocaleDateString('en-CA');
+  };
+  const prints = data.rvPrints;
+  const printsBanner = (prints && prints.count > 1)
+    ? `<div class="banner" style="margin-bottom:14px;background:var(--surface);border-color:var(--border-soft);"><b>Sale was re-issued in RV.</b> There are ${prints.count} SALES EDIT prints on Drive. The newest, <code>${esc(prints.used)}</code>${localDate(prints.usedFiled) ? ` (filed ${esc(localDate(prints.usedFiled))})` : ''}, is the one compared, so anything changed in RV after the ticket was written shows up as a difference.</div>`
+    : '';
+
+  // A sale ticket whose items were returned afterwards: RV shows the sale
+  // after the return, which the ticket cannot match.
+  let laterReturnBanner = '';
+  if (!data.returnAudit) {
+    const later = data.laterReturns || [];
+    const forms = data.returnForms || [];
+    const money = (v) => `$${num(v)}`;
+    if (later.length) {
+      const parts = later.map((r) => {
+        const names = (list) => list.map((x) => `${esc(x.label)}${Number(x.qty) > 1 ? ` ×${esc(x.qty)}` : ''}`).join(', ');
+        const bits = [];
+        if (r.returned.length) bits.push(`returned ${names(r.returned)} (${money(r.returnedValue)})`);
+        else if (Number(r.returnedValue) > 0) bits.push(`returned charges of ${money(r.returnedValue)}`);
+        if (r.added.length) bits.push(`added ${names(r.added)} (${money(r.newItemsValue)})`);
+        return `Return ticket <code>#${esc(r.id)}</code> (${esc(r.date)}) ${bits.join(' and ') || 'changed this sale'}.`;
+      }).join(' ');
+      laterReturnBanner = `<div class="banner warn" style="margin-bottom:14px;"><b>Returned after this ticket.</b> ${parts} RV now shows the sale after the return, so those items and the changed totals appear below as mismatches. Open the return ticket to audit the return itself.</div>`;
+    } else if (forms.length) {
+      const f = forms[forms.length - 1];
+      laterReturnBanner = `<div class="banner warn" style="margin-bottom:14px;"><b>A return was filed against this sale.</b> <code>${esc(f.name)}</code> was added to the sale's Drive folder${localDate(f.createdTime) ? ` on ${esc(localDate(f.createdTime))}` : ''}. RV now shows the sale after that return, so returned items and changed totals may appear below as mismatches.</div>`;
+    }
+  }
+
   const viaBanner = (data.deliveryViaLabel && data.deliveryViaMapped === false)
     ? `<div class="banner warn" style="margin-bottom:14px;"><b>Unrecognised delivery route.</b> The PDF says <code>${esc(data.deliveryViaLabel)}</code>, which doesn't map to a known RV DeliveryVia code — it is being compared as-is. Add it to <code>RV_DELIVERY_VIA_MAP</code> in <code>.env</code> to fix the comparison.</div>`
     : '';
@@ -453,23 +496,26 @@ function renderAudit(data) {
     ${fuzzyBanner}
     ${uploadBanner}
     ${folderBanner}
+    ${laterReturnBanner}
+    ${printsBanner}
     ${receiptBanner}
     ${viaBanner}
+    ${ret ? returnPanel(data) : ''}
 
     <div class="summary-chips">
       ${chip('Customer', grpCount('customer'))}
       ${chip('Dates',    grpCount('dates'))}
       ${chip('Totals',   grpCount('totals'))}
       ${chip('Items',    grpCount('items'))}
-      ${(json.packages || []).length || (mssql.packages || []).length ? chip('Packages', grpCount('packages')) : ''}
+      ${(cardJson.packages || []).length || (cardRv.packages || []).length ? chip('Packages', grpCount('packages')) : ''}
       ${viaChip(mssql.deliveryVia, data.expectedDeliveryVia)}
       ${gmChip(mssql.totals)}
     </div>
 
     <div class="compare-grid">
-      ${sideCard('Ticket', 'invoices-archive', json, 'json', diffSet, itemOrder, { reconciled, ownPackageRows: ticketPackageRows },
+      ${sideCard('Ticket', 'invoices-archive', cardJson, 'json', diffSet, itemOrder, { reconciled, ownPackageRows: ticketPackageRows, ...cardView },
         `<button id="viewTicketPdf" class="view-pdf-btn" data-name="${esc(json.customer.name)}" title="Open the customer ticket PDF from Google Drive">📄 View Ticket PDF</button>`)}
-      ${sideCard('RV',     'SALES EDIT pdf',  mssql, 'mssql', diffSet, itemOrder, { reconciled, ownPackageRows: new Set() },
+      ${sideCard('RV',     'SALES EDIT pdf',  cardRv, 'mssql', diffSet, itemOrder, { reconciled, ownPackageRows: new Set(), ...cardView },
         `${salePdfButtons(data)}<button id="openRvViewer" class="view-rv-btn">📋 View in RV</button>`)}
     </div>
 
@@ -935,7 +981,10 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, ex
   const headerRows = [
     ['customer/name',                 'Name',           c.name],
     ['customer/cell',                 'Phone',          formatPhone(c.cell)],
-    ['customer/email',                'Email',          c.email],
+    // The RV email normally comes off the SALES EDIT; tag it when that was
+    // blank and the receipt's email was compared instead.
+    ['customer/email',                'Email',          c.email,
+      c.emailFromReceipt ? ' <span class="opt-tag tag-delivery" title="The SALES EDIT has no email, so the one printed on the RV receipt was used">from RV RCPT</span>' : ''],
     // billing
     ['__SECTION__',                   'BILLING ADDRESS', ''],
     ['customer/billing.address',      'Address',        bill.address],
@@ -972,6 +1021,7 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, ex
       builtRows.push({ kind: 'section', label });
       continue;
     }
+    if (pkgView.onlyKeys && !pkgView.onlyKeys.has(key)) continue;
     let isDiff = diffSet.has(key);
     if (hideMatchedRows && !isDiff) continue;
     builtRows.push({ kind: 'row', label, value, isDiff, suffixHtml, labelExtraClass });
@@ -999,8 +1049,8 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, ex
     <div class="card-mini-section">NOTES</div>
     <div class="notes-block${rec.notes ? '' : ' empty'}">${rec.notes ? esc(rec.notes) : '(no notes)'}</div>`;
 
-  const packagesHtml = renderPackagesSection(rec.packages, diffSet);
-  const itemsHtml = renderItemsSection(rec.items, itemOrder, diffSet, pkgView);
+  const packagesHtml = pkgView.hideItems ? '' : renderPackagesSection(rec.packages, diffSet);
+  const itemsHtml = pkgView.hideItems ? '' : renderItemsSection(rec.items, itemOrder, diffSet, pkgView);
 
   return `
     <div class="compare-card">
@@ -1019,6 +1069,88 @@ function sideCard(title, source, rec, side, diffSet, itemOrder, pkgView = {}, ex
         ${packagesHtml}
         ${itemsHtml}
       </div>
+    </div>`;
+}
+
+// --- return tickets ---------------------------------------------------------
+//
+// The side-card rows a return is checked on: who the customer is, and (when RV
+// changed the original sale in place) the sale date. Money and items are shown
+// in the return panel instead, because the ticket's own totals are a copy of
+// the original sale and would read as mismatches that aren't.
+function returnRowKeys(mode) {
+  const keys = new Set([
+    'customer/name', 'customer/cell', 'customer/email',
+    'customer/billing.address', 'customer/billing.city', 'customer/billing.state', 'customer/billing.zip',
+    'customer/delivery.address', 'customer/delivery.city', 'customer/delivery.state', 'customer/delivery.zip',
+  ]);
+  if (mode === 'in-place') keys.add('dates/order');
+  return keys;
+}
+
+function returnPanel(data) {
+  const a = data.returnAudit;
+  const t = a.totals;
+  const money = (v) => `${Number(v) < 0 ? '−' : ''}$${num(Math.abs(Number(v) || 0))}`;
+  const mark = (ok) => (ok === true ? '<span class="rt-ok" title="agrees">✓</span>'
+    : ok === false ? '<span class="rt-bad" title="does not agree">✗</span>'
+      : '<span class="rt-na" title="not checked">—</span>');
+
+  let how;
+  if (a.mode === 'in-place') {
+    how = `RV recorded it by changing the original sale <code>#${esc(a.rvSalesNo)}</code>.`;
+  } else if (a.mode === 'return-sale') {
+    how = `RV recorded it as a separate return sale <code>#${esc(a.rvSalesNo)}</code>`
+      + `${a.rvSaleDate ? ` dated <code>${esc(a.rvSaleDate)}</code>` : ''}`
+      + `${a.rvNumber ? `, against original sale <code>#${esc(a.rvNumber)}</code>` : ''}.`;
+  } else {
+    how = `The PDF found is sale <code>#${esc(a.rvSalesNo)}</code>, but this return is for sale <code>#${esc(a.rvNumber)}</code> `
+      + 'and the PDF has no return lines on it. It looks like a different sale for the same customer, so the return could not be checked.';
+  }
+  const original = a.original
+    ? ` Original ticket <code>#${esc(a.original.id)}</code>${a.original.date ? ` (${esc(a.original.date)})` : ''}.`
+    : '';
+  const source = a.checkedAgainst === 'receipt' && data.receipt
+    ? `the RV receipt <code>${esc(data.receipt.name)}</code>`
+    : `the SALES EDIT <code>${esc((data.driveFile && data.driveFile.name) || '')}</code>`;
+
+  const lineRows = (a.lines || []).map((l) => `
+      <tr>
+        <td class="rt-mark">${mark(l.ok)}</td>
+        <td><span class="opt-tag ${l.kind === 'returned' ? 'tag-return' : 'tag-delivery'}">${l.kind === 'returned' ? 'Returned' : 'Added'}</span></td>
+        <td>${esc(l.label)}${l.itemId ? ` <span class="rt-id">#${esc(String(l.itemId).toUpperCase())}</span>` : ''}</td>
+        <td class="rt-num">${l.value !== undefined ? money(l.value) : ''}</td>
+        <td>${esc(l.ticket || '')}</td>
+        <td class="${l.ok === false ? 'rt-bad-text' : ''}">${esc(l.rv || '')}</td>
+      </tr>`).join('');
+
+  let totalsHtml = '';
+  if (t) {
+    const sum = a.mode === 'in-place'
+      ? `Sale before the return ${money(t.before)} − returned ${money(t.returnedValue)} + added ${money(t.newItemsValue)}`
+      : `Added ${money(t.newItemsValue)} − returned ${money(t.returnedValue)}`;
+    const charges = t.chargesIncluded ? ` + return charges ${money(t.newCharges)}` : '';
+    totalsHtml = `
+      <div class="rt-totals">
+        <div>${mark(t.subtotalOk)} <b>Subtotal.</b> ${sum}${charges} = expected <b>${money(t.expectedSubtotal)}</b>. RV shows <b class="${t.subtotalOk ? '' : 'rt-bad-text'}">${money(t.rvSubtotal)}</b>.</div>
+        ${t.expectedTax !== null ? `<div>${mark(t.taxOk)} <b>Tax.</b> Expected ${money(t.expectedTax)}. RV shows <span class="${t.taxOk ? '' : 'rt-bad-text'}">${money(data.mssql.totals.tax)}</span>.</div>` : ''}
+        ${t.expectedTotal !== null ? `<div>${mark(t.totalOk)} <b>Total.</b> Expected ${money(t.expectedTotal)}. RV shows <span class="${t.totalOk ? '' : 'rt-bad-text'}">${money(data.mssql.totals.total)}</span>.</div>` : ''}
+      </div>`;
+  }
+
+  const notes = (a.notes || []).map((n) => `<div class="rt-note">${esc(n)}</div>`).join('');
+
+  return `
+    <div class="return-panel">
+      <div class="rt-head"><span class="opt-tag tag-return">Return ticket</span> ${how}${original}</div>
+      <div class="rt-sub">Only the returned and added lines and the sale total are checked, against ${source}. The rest of the sale and the payments are not compared.</div>
+      ${lineRows ? `
+      <table class="diff-table rt-table">
+        <thead><tr><th style="width:34px;"></th><th style="width:92px;">Line</th><th>Item</th><th style="width:96px;">Value</th><th>Ticket</th><th>RV</th></tr></thead>
+        <tbody>${lineRows}</tbody>
+      </table>` : ''}
+      ${totalsHtml}
+      ${notes}
     </div>`;
 }
 

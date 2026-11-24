@@ -5,7 +5,7 @@ const express = require('express');
 const { fetchInvoicesByDate } = require('./src/sources/invoices');
 const { findCustomerPdf, streamPdf } = require('./src/sources/drive');
 const {
-  findSalesEditPdf, loadSalesEdit, loadReceiptFor,
+  findSalesEditPdf, loadSalesEdit, loadReceiptFor, describeSaleFolder,
   saveSessionUpload, removeSessionUpload,
 } = require('./src/sources/salesEdit');
 const { extractLines } = require('./src/parse/pdfLayout');
@@ -17,6 +17,76 @@ const { addressLooseMatch } = require('./src/match/address');
 const { expectedDeliveryVia } = require('./src/match/deliveryVia');
 const { isKnownDeliveryViaLabel } = require('./src/match/rvCodes');
 const { compare } = require('./src/compare/diff');
+const { compareReturn } = require('./src/compare/returnAudit');
+
+// A return ticket points back at the sale it returns from. That ticket was
+// written on an earlier day, and its slug carries the date
+// ("BRENTPERRY_20261122173220D559"), so it can be fetched from that day's
+// archive. Best effort — the return is still audited without it.
+async function findOriginalInvoice(slug, sameDay) {
+  const wanted = String(slug || '').trim();
+  if (!wanted) return null;
+  const inDay = (sameDay && sameDay.data) || [];
+  const here = inDay.find((r) => r.slug === wanted);
+  if (here) return here;
+
+  const m = /_(\d{4})(\d{2})(\d{2})\d{6}/.exec(wanted);
+  if (!m) return null;
+  try {
+    const day = await fetchInvoicesByDate(`${m[1]}-${m[2]}-${m[3]}`);
+    return (day.data || []).find((r) => r.slug === wanted) || null;
+  } catch (e) {
+    console.warn(`return audit: could not load original ticket ${wanted}: ${e.message}`);
+    return null;
+  }
+}
+
+// Return tickets written against a sale ticket.
+//
+// The audit compares a sale against RV as it stands now. If part of the sale
+// has since been returned, RV no longer matches the ticket — correctly — and
+// the auditor needs to be told why. The same day's archive is already in
+// hand. Beyond that, a return form in the sale's Drive folder says which day
+// the return was written; its filing time is UTC, so that date and the one
+// before it are checked. Best effort: a failed lookup just means no note.
+const MAX_RETURN_DAYS = 4;
+async function findReturnsFor(rec, sameDay, date, folder) {
+  const slug = String((rec && rec.slug) || '').trim();
+  if (!slug) return [];
+
+  const days = new Map([[date, sameDay]]);
+  for (const form of (folder && folder.returnForms) || []) {
+    const t = Date.parse(form.createdTime);
+    if (Number.isNaN(t)) continue;
+    for (const back of [0, 1]) {
+      const d = new Date(t - back * 86400000).toISOString().slice(0, 10);
+      if (!days.has(d) && days.size <= MAX_RETURN_DAYS) days.set(d, null);
+    }
+  }
+
+  const found = [];
+  for (const [d, known] of days) {
+    let day = known;
+    if (!day) {
+      try { day = await fetchInvoicesByDate(d); } catch (e) { continue; }
+    }
+    for (const r of (day && day.data) || []) {
+      if (String(r.transaction_mode || '').toUpperCase() !== 'RETURN') continue;
+      if (String((r.form_json && r.form_json.originalInvoiceSlug) || '').trim() !== slug) continue;
+      const n = normalizeInvoice(r);
+      const label = (x) => [x.ven, x.sku].filter(Boolean).join(' ') || x.description || 'item';
+      found.push({
+        id: n.id,
+        date: d,
+        returned: n.returnInfo.returned.map((x) => ({ label: label(x), qty: x.returnQty })),
+        added: n.items.filter((x) => !x.isReturn).map((x) => ({ label: label(x), qty: x.qty })),
+        returnedValue: n.returnInfo.returnedValue,
+        newItemsValue: n.returnInfo.newItemsValue,
+      });
+    }
+  }
+  return found.sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.id - b.id);
+}
 
 // Compare two phone strings by their last 10 digits (US numbers; ignores
 // formatting and leading country code).
@@ -367,6 +437,13 @@ app.get('/api/audit', async (req, res) => {
     const header = sale.header;
     const itemRows = sale.items;
 
+    // How many times RV printed this sale, and whether a return was filed
+    // against it — both explain why a sale no longer matches its ticket.
+    const folder = await describeSaleFolder(file).catch(() => null);
+    const laterReturns = jsonNorm.isReturn
+      ? []
+      : await findReturnsFor(rec, archive, date, folder).catch(() => []);
+
     // The customer receipt filed beside the SALES EDIT states the whole-sale
     // totals with one figure per label, where the SALES EDIT prints three
     // columns that only agree when nothing is back ordered. Use it to check
@@ -398,6 +475,15 @@ app.get('/api/audit', async (req, res) => {
       for (const row of itemRows) {
         if (backOrdered.has(normId(row.sale_item))) row.__back_ordered = true;
       }
+
+      // The SALES EDIT is the source for the customer's email, but it leaves
+      // the line out when RV has none on that screen. Rather than compare the
+      // Ticket against a blank, fall back to the email the receipt prints.
+      if (!String(header.cust_email || '').trim() && receipt.email) {
+        header.cust_email = receipt.email;
+        header.__email_from_receipt = true;
+        if (sale.custMaster) sale.custMaster.cust_email = receipt.email;
+      }
     }
 
     // Gross margin comes straight off the report footer. Fall back to summing
@@ -417,6 +503,7 @@ app.get('/api/audit', async (req, res) => {
     }
 
     const mssqlNorm = normalizeMssqlRows([header], itemRows);
+    if (mssqlNorm && header.__email_from_receipt) mssqlNorm.customer.emailFromReceipt = true;
 
     // Gross margin is an RV-side figure (only RV carries cost), but it applies
     // to the same sale, so surface it on both cards.
@@ -429,7 +516,20 @@ app.get('/api/audit', async (req, res) => {
       if (jsonNorm && jsonNorm.totals) Object.assign(jsonNorm.totals, gm);
     }
 
-    const result = compare(jsonNorm, mssqlNorm);
+    // A return ticket is checked on its returned / replacement lines and the
+    // money, not line-for-line against the whole sale.
+    let result;
+    if (jsonNorm.isReturn) {
+      const originalRec = await findOriginalInvoice(jsonNorm.returnInfo.originalInvoiceSlug, archive);
+      result = compareReturn(jsonNorm, mssqlNorm, {
+        original: originalRec ? normalizeInvoice(originalRec) : null,
+        originalLines: (originalRec && originalRec.form_json && originalRec.form_json.items) || [],
+        rvRows: itemRows.map((row) => ({ itemId: row.sale_item, qty: Number(row.sale_qty) || 0 })),
+        receiptRows: receipt ? (receipt.items || []).map((i) => ({ itemId: i.itemId, qty: Number(i.qty) || 0 })) : null,
+      });
+    } else {
+      result = compare(jsonNorm, mssqlNorm);
+    }
     const expectedVia = expectedDeliveryVia({
       state: (jsonNorm.customer.delivery && jsonNorm.customer.delivery.state) || jsonNorm.customer.state,
       orderDate: jsonNorm.dates.order,
@@ -442,7 +542,9 @@ app.get('/api/audit', async (req, res) => {
     // sale on a different day than the ticket.
     const match = scoreSaleMatch(header, jsonNorm);
     const rvDate = (mssqlNorm && mssqlNorm.dates && mssqlNorm.dates.order) || '';
-    const dateOffDays = rvDate ? daysBetween(date, rvDate) : 0;
+    // A return is written days or months after the sale it returns from, so
+    // its date never lines up with the sale's — that is not a wrong file.
+    const dateOffDays = (rvDate && !jsonNorm.isReturn) ? daysBetween(date, rvDate) : 0;
 
     // The Drive folder is named "<sale no> <CUSTOMER NAME>", so its number is
     // an independent check on the SALES-NO printed inside the PDF. They should
@@ -476,6 +578,18 @@ app.get('/api/audit', async (req, res) => {
         : null,
       // Non-empty when the two RV documents disagreed; the receipt was used.
       totalsCorrectedFromReceipt: totalsCheck,
+      // Every SALES EDIT print of this sale on Drive, oldest first. The audit
+      // uses the newest; more than one means RV changed the sale after it
+      // was first filed.
+      rvPrints: (folder && folder.salesEdits.length)
+        ? { count: folder.salesEdits.length, files: folder.salesEdits, used: sale.file.name, usedFiled: sale.file.createdTime }
+        : null,
+      // For a sale ticket: returns written against it since, and any return
+      // form filed in its Drive folder.
+      laterReturns,
+      returnForms: jsonNorm.isReturn ? [] : ((folder && folder.returnForms) || []),
+      // True when the SALES EDIT had no email and the receipt's was compared.
+      emailFromReceipt: Boolean(header.__email_from_receipt),
       // raw RV data for the View-in-RV modal
       rvRaw: {
         header,

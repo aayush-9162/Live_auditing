@@ -675,6 +675,30 @@ body.sidebar-collapsed .sidebar-scroll-buttons { display: none; }
 }
 .opt-tag.tag-pickup   { background: rgba(167, 139, 250, 0.18); color: #c4b5fd; }
 .opt-tag.tag-delivery { background: rgba(91, 141, 239, 0.18);  color: #93b4f5; }
+.opt-tag.tag-return   { background: var(--amber-soft); color: var(--amber); }
+
+/* Return tickets: what the return says against what RV shows */
+.return-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.return-panel .rt-head { margin-bottom: 4px; }
+.return-panel .rt-sub { color: var(--text-mute); font-size: 12.5px; margin-bottom: 12px; }
+.return-panel .rt-table { margin-bottom: 12px; }
+.return-panel .rt-mark { text-align: center; }
+.return-panel .rt-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.return-panel .rt-id { color: var(--text-mute); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+.return-panel .rt-totals > div { padding: 3px 0; }
+.return-panel .rt-note { color: var(--text-soft); font-size: 12.5px; margin-top: 8px; }
+.rt-ok  { color: var(--green); font-weight: 700; }
+.rt-bad { color: var(--red); font-weight: 700; }
+.rt-na  { color: var(--text-mute); }
+.rt-bad-text { color: var(--red); font-weight: 600; }
 
 /* Bolder label when row represents a pickup (vs delivery) */
 .field-row .k.k-bold { color: var(--text); font-weight: 700; }

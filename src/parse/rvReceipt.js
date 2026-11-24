@@ -72,6 +72,49 @@ function readIdentifiers(lines) {
   return out;
 }
 
+// The customer's email, when RV has one, is printed in the "Sold To / Deliver
+// To" block on the same row as the phone numbers:
+//
+//     Sold To:                          Deliver To:
+//     Nancy Underwood                   Nancy Underwood
+//     12 Some Road                      12 Some Road
+//     Waynesville, NC 28786             Waynesville, NC 28786
+//     (828) 555-0100 C                  nancy@example.com
+//
+// Only that block is searched. The store's own contact details sit above it,
+// and item lines below it can carry an "@" of their own ("DEL & SETUP @ NO
+// CHARGE"), so neither may be mistaken for the customer's address.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+
+function readEmail(lines, blockEnd) {
+  const start = lines.findIndex((l) => /Sold\s*To/i.test(l.text));
+  if (start < 0) return '';
+  const end = blockEnd > start ? blockEnd : lines.length;
+
+  for (let i = start + 1; i < end; i++) {
+    const cells = lines[i].cells;
+    if (!cells.some((c) => c.str.includes('@'))) continue;
+
+    const whole = cells.find((c) => EMAIL_RE.test(c.str.trim()));
+    if (whole) return whole.str.trim().toLowerCase();
+
+    // The PDF writer sometimes breaks one printed word into several runs (it
+    // does so for the sale date), so also try runs that touch end to end.
+    let run = '';
+    let lastEnd = null;
+    const runs = [];
+    for (const c of cells) {
+      if (lastEnd !== null && c.x - lastEnd > 2) { runs.push(run); run = ''; }
+      run += c.str.trim();
+      lastEnd = c.xEnd;
+    }
+    runs.push(run);
+    const joined = runs.find((r) => EMAIL_RE.test(r));
+    if (joined) return joined.toLowerCase();
+  }
+  return '';
+}
+
 // Item rows look like
 //    1   EA   1163971   JOHN 0145606 CUPRUM KING 6/6    2,000.00   2,000.00
 //  B/O                  PLUSH EPT FD HD AIRELUXE MATT 6/6
@@ -163,8 +206,13 @@ function parseRvReceipt(pages) {
     return null;
   };
 
+  // The customer block ends where the salesperson row or the item table starts.
+  const salespersonIdx = findIdx(/Salesperson|Payment\s*Terms/i);
+  const blockEnd = salespersonIdx >= 0 ? salespersonIdx : headerIdx;
+
   return {
     ...ids,
+    email: readEmail(lines, blockEnd),
     ...(() => {
       // Salesperson codes, delivery route and payment terms share one row
       // under their headings. The values sit well left of the headings they

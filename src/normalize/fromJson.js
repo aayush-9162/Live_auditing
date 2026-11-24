@@ -47,11 +47,71 @@ function normalizeInvoice(rec) {
     || !toStr(ship.address_1);
   const delivSrc = sameAsBilling ? bill : ship;
 
+  // A RETURN ticket ("RTS") lists the lines being returned — negative
+  // quantity, flagged isReturn, no RV item id — plus any replacement lines.
+  // It is audited on those lines, not as a sale (see compare/returnAudit).
+  const isReturn = toStr(rec.transaction_mode || fj.transactionMode).toUpperCase() === 'RETURN';
+  const isReturnLine = (it) => String(it.isReturn) === 'true' || toNumber(it.qty) < 0;
+
   return {
     id: rec.id,
     slug: rec.slug,
     invoiceType: toStr(rec.invoice_type),
     transactionMode: toStr(rec.transaction_mode),
+    isReturn,
+
+    returnInfo: (() => {
+      if (!isReturn) return null;
+      const rts = (fj.rts && typeof fj.rts === 'object') ? fj.rts : {};
+      const sum = (fj.rtsSummary && typeof fj.rtsSummary === 'object') ? fj.rtsSummary : {};
+      const round2 = (v) => Math.round(v * 100) / 100;
+
+      // rts.itemsReturning knows how many of the line were originally sold;
+      // the ticket's own negative lines are the fallback.
+      const listed = Array.isArray(rts.itemsReturning) && rts.itemsReturning.length
+        ? rts.itemsReturning
+        : items.filter(isReturnLine).map((it) => ({
+          originalItemId: it.id, ven: it.ven, sku: it.sku, description: it.description,
+          salePrice: it.salePrice, extendedPrice: it.extendedPrice,
+          originalQty: Math.abs(toNumber(it.qty)), returnQty: Math.abs(toNumber(it.qty)),
+        }));
+      const returned = listed.map((it) => ({
+        lineId: toStr(it.originalItemId),
+        ven: toStr(it.ven),
+        sku: toStr(it.sku),
+        description: toStr(it.description),
+        salePrice: toNumber(it.salePrice),
+        // The Ticket's "extended price" is per unit, so a line's value is
+        // this times its quantity.
+        extendedPrice: toNumber(it.extendedPrice),
+        originalQty: toNumber(it.originalQty) || toNumber(it.returnQty) || 1,
+        returnQty: toNumber(it.returnQty) || 1,
+      }));
+
+      const returnedItemsValue = sum.returnedItemsValue !== undefined
+        ? toNumber(sum.returnedItemsValue)
+        : round2(returned.reduce((a, r) => a + r.extendedPrice * r.returnQty, 0));
+      // Includes a delivery fee or care plan handed back with the items.
+      const returnedValue = sum.returnedValue !== undefined ? toNumber(sum.returnedValue) : returnedItemsValue;
+      const newItemsValue = round2(items.filter((it) => !isReturnLine(it))
+        .reduce((a, it) => a + toNumber(it.extendedPrice) * (toNumber(it.qty) || 1), 0));
+      // rtsSubtotal is the replacement items plus any delivery / care-plan
+      // charge the ticket puts on the return itself.
+      const newCharges = sum.rtsSubtotal !== undefined
+        ? Math.max(0, round2(toNumber(sum.rtsSubtotal) - newItemsValue))
+        : 0;
+
+      return {
+        originalInvoiceSlug: toStr(fj.originalInvoiceSlug),
+        rvNumber: toStr(rts.rvNumber),
+        returnDate: normalizeDate(rts.returnDate),
+        returned,
+        returnedItemsValue,
+        returnedValue,
+        newItemsValue,
+        newCharges,
+      };
+    })(),
 
     customer: {
       name: toStr(bill.name1),
@@ -178,6 +238,9 @@ function normalizeInvoice(rec) {
         // Members of a package carry its key. Their extendedPrice is 0 —
         // the money sits on the package, not the line (see `packages`).
         packageKey: toStr(it.packageKey),
+        // On a return ticket: true for a line being handed back, false for
+        // a replacement going on the sale.
+        isReturn: isReturn && isReturnLine(it),
       }));
       // Mirror the RV-side aggregation: if the same numeric itemId appears
       // on multiple rows (each qty=1), collapse to a single row with summed

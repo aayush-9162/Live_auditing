@@ -28,15 +28,32 @@ function driveEscape(s) {
   return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+// A sale that is changed in RV after it was first filed — a payment taken, an
+// item returned or swapped — is printed again and filed beside the first
+// print as "<customer> SALES EDIT 2.pdf", then "… 3.pdf", with the receipt
+// numbered to match ("… RV RCPT 3.pdf"). About one sale folder in ten has
+// these. The highest number is the sale as it stands now.
+//
+// Returns the print number of a file for the given document suffix: 1 for the
+// unnumbered first print, 0 if the file is not that document at all.
+function printNumber(fileName, suffix) {
+  const m = new RegExp(`${suffix}\\s*(\\d{1,2})?\\s*\\.PDF$`).exec(String(fileName || '').toUpperCase());
+  if (!m) return 0;
+  return m[1] ? Number(m[1]) : 1;
+}
+
 // Drive's `name contains` matches whole words, so "SARA BRYANT" finds
 // "SARA BRYANT SALES EDIT.pdf" exactly as typing it into the Drive search box
 // does. Results are ranked so the file actually named
 // "<customer> SALES EDIT.pdf" wins over anything else that mentions the name.
+// A numbered reprint is that same document re-issued, so it ranks with the
+// first print rather than behind it — the caller then takes the newest.
 function rank(file, customerName) {
   const name = String(file.name || '').toUpperCase();
+  const base = printNumber(name, SUFFIX) ? name.replace(new RegExp(`(${SUFFIX})\\s*\\d{0,2}\\s*\\.PDF$`), '$1.PDF') : name;
   const want = `${String(customerName || '').toUpperCase().replace(/\s+/g, ' ').trim()} ${SUFFIX}.PDF`;
-  if (name === want) return 0;
-  if (name.endsWith(`${SUFFIX}.PDF`)) return 1;
+  if (base === want) return 0;
+  if (base.endsWith(`${SUFFIX}.PDF`)) return 1;
   if (name.includes(SUFFIX)) return 2;
   return 3;
 }
@@ -321,10 +338,13 @@ function byNameThenRecency(customerName) {
     || String(b.createdTime).localeCompare(String(a.createdTime));
 }
 
+// Best candidate first: the right document for this customer, then the latest
+// print of it (see printNumber), then the most recently filed.
 function salesEditPdfs(files, customerName) {
   return files
     .filter((f) => !isDir(f) && /\.pdf$/i.test(f.name) && f.name.toUpperCase().includes(SUFFIX))
     .sort((a, b) => rank(a, customerName) - rank(b, customerName)
+      || printNumber(b.name, SUFFIX) - printNumber(a.name, SUFFIX)
       || String(b.createdTime).localeCompare(String(a.createdTime)));
 }
 
@@ -544,12 +564,39 @@ async function fetchSaleForCustomer(customerName) {
 
 const receiptCache = new Map();
 
+// The receipt that goes with the SALES EDIT being audited. Each reprint of a
+// sale gets its own numbered receipt, so take the one printed with this
+// SALES EDIT. With no matching number, fall back to the newest receipt — but
+// never one from an earlier print, whose totals would overwrite newer ones.
 async function findReceiptPdf(saleFile) {
   if (!saleFile || !saleFile.folderId) return null;
   const files = await listChildren(saleFile.folderId);
-  return files
+  const receipts = files
     .filter((f) => !isDir(f) && f.name.toUpperCase().includes(RECEIPT_SUFFIX))
-    .sort((a, b) => String(b.createdTime).localeCompare(String(a.createdTime)))[0] || null;
+    .sort((a, b) => String(b.createdTime).localeCompare(String(a.createdTime)));
+  if (!receipts.length) return null;
+
+  const want = printNumber(saleFile.name, SUFFIX);
+  if (!want) return receipts[0];               // unusual file name — keep the old behaviour
+  const same = receipts.find((f) => printNumber(f.name, RECEIPT_SUFFIX) === want);
+  if (same) return same;
+  const newest = receipts[0];
+  const newestPrint = printNumber(newest.name, RECEIPT_SUFFIX);
+  return (!newestPrint || newestPrint > want) ? newest : null;
+}
+
+// What else sits in the sale's Drive folder that bears on the audit: how many
+// times the sale was printed, and any return form ("<customer> RTS.pdf") filed
+// against it. Null when the sale has no folder of its own to look in.
+async function describeSaleFolder(saleFile) {
+  if (!saleFile || !saleFile.folderId) return null;
+  const files = (await listChildren(saleFile.folderId)).filter((f) => !isDir(f) && /\.pdf$/i.test(f.name));
+  const brief = (f) => ({ name: f.name, createdTime: f.createdTime });
+  const oldestFirst = (a, b) => String(a.createdTime).localeCompare(String(b.createdTime));
+  return {
+    salesEdits: files.filter((f) => printNumber(f.name, SUFFIX) > 0).sort(oldestFirst).map(brief),
+    returnForms: files.filter((f) => /\bRTS\b/i.test(f.name)).sort(oldestFirst).map(brief),
+  };
 }
 
 // Returns null rather than throwing: the receipt is a cross-check, so a sale
@@ -584,6 +631,9 @@ module.exports = {
   removeSessionUpload,
   findSessionUpload,
   findReceiptPdf,
+  describeSaleFolder,
+  printNumber,
+  salesEditPdfs,
   loadReceiptFor,
   findSalesEditPdf,
   findViaFolder,
