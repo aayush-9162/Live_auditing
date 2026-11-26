@@ -273,7 +273,8 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
         .map((r) => {
           const it = normalizeItem(r);
           return {
-            key:     toStr(r.sale_item),
+            // Unique on the sale even when RV printed two roll-ups as "*PKG".
+            key:     toStr(r.__package_key || r.sale_item),
             label:   [it.ven, it.sku, it.cover].filter(Boolean).join(' ') || toStr(r.sale_item),
             price:   toNumber(r.sale_price),
             itemIds: (r.__member_item_ids || []).map((id) => stripLeadingZeros(trimAll(id))),

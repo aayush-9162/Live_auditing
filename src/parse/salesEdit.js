@@ -588,6 +588,23 @@ function parseTotals(lines, from, anchors) {
 // running total lands on the package price; if it never does (an unexpected
 // layout), leave the rows unassigned rather than guessing.
 function linkPackageMembers(rows) {
+  // A package made up at the counter prints with no item number of its own,
+  // just "*PKG", so two of them on one sale would share an id. Give each
+  // roll-up a key that is unique on the sale; the printed id is left alone.
+  const seen = new Map();
+  for (const row of rows) {
+    if (!row.__is_package) continue;
+    const n = (seen.get(row.sale_item) || 0) + 1;
+    seen.set(row.sale_item, n);
+    row.__package_key = n === 1 ? row.sale_item : `${row.sale_item}#${n}`;
+  }
+
+  const claim = (pkg, members) => {
+    for (const m of members) m.__package_of = pkg.__package_key;
+    pkg.__member_item_ids = members.map((m) => m.sale_item);
+  };
+
+  // The roll-up row normally sits above its component lines.
   for (let i = 0; i < rows.length; i++) {
     const pkg = rows[i];
     if (!pkg.__is_package) continue;
@@ -601,12 +618,27 @@ function linkPackageMembers(rows) {
       if (Math.abs(sum - target) < 0.01) break;
     }
 
-    if (target > 0 && Math.abs(sum - target) < 0.01) {
-      for (const m of members) m.__package_of = pkg.sale_item;
-      pkg.__member_item_ids = members.map((m) => m.sale_item);
-    } else {
-      pkg.__member_item_ids = [];
+    if (target > 0 && Math.abs(sum - target) < 0.01) claim(pkg, members);
+    else pkg.__member_item_ids = [];
+  }
+
+  // But the report also prints it below them: on a sale with two packages the
+  // second roll-up can follow its own lines ("…1163493, 1174066, *PKG
+  // 2,999.00"). For a package still unresolved, take the unclaimed lines
+  // directly above it instead.
+  for (let i = 0; i < rows.length; i++) {
+    const pkg = rows[i];
+    if (!pkg.__is_package || pkg.__member_item_ids.length) continue;
+
+    const target = Number(pkg.sale_price) || 0;
+    const members = [];
+    let sum = 0;
+    for (let j = i - 1; j >= 0 && !rows[j].__is_package && !rows[j].__package_of; j--) {
+      sum += Number(rows[j].sale_price) || 0;
+      members.unshift(rows[j]);
+      if (Math.abs(sum - target) < 0.01) break;
     }
+    if (target > 0 && Math.abs(sum - target) < 0.01) claim(pkg, members);
   }
 }
 

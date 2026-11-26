@@ -223,8 +223,11 @@ function itemLabel(it) {
 // pair them by how many member items they share, falling back to an equal
 // price when membership is unknown.
 // A package's item id, without the "*PKG" marker the RV parser adds.
+// Empty when RV printed the roll-up with no item number of its own (a package
+// put together at the counter prints as plain "*PKG").
 function packageBareId(key) {
-  return normalizeItemId(String(key || '').replace(/^\*PKG/i, ''));
+  const bare = String(key || '').replace(/^\*PKG/i, '').trim();
+  return /^[a-z0-9]+$/i.test(bare) ? normalizeItemId(bare) : '';
 }
 
 // Tickets book a package one of two ways:
@@ -253,12 +256,60 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
   const jsonItems = jsonInvoice.items || [];
   const mssqlItems = mssqlRecord.items || [];
 
-  for (const pkg of mssqlRecord.packages || []) {
+  const rvPackages = mssqlRecord.packages || [];
+  const pairs = [];                            // { pkg, line, bare, coverage }
+  const takenLines = new Set();
+
+  // 1. The Ticket line's item id is the package's own id.
+  for (const pkg of rvPackages) {
     const bare = packageBareId(pkg.key);
     if (!bare) continue;
     const line = jsonItems.find((it) => normalizeItemId(it.itemId) === bare);
     if (!line) continue;                       // style (a), or genuinely absent
+    pairs.push({ pkg, line, bare });
+    takenLines.add(line);
+  }
 
+  // 2. RV printed the roll-up with no item number ("*PKG  PACKAGE SALE"), so
+  //    there is no id to match on. The Ticket still books the set on one line
+  //    under the set's id ("2400 05/40/64 FK HADLIN/BIRSTO, 3 PIECE
+  //    SECTIONAL") while RV lists only the pieces ("2400 40 …", "2400 05 …",
+  //    "2400 64 …"). Pair such a line with the package whose pieces spell out
+  //    its SKU; an equal price is the fallback when RV could not say which
+  //    pieces belong to the package.
+  const rvItemIds = new Set(mssqlItems.map((it) => normalizeItemId(it.itemId)).filter(Boolean));
+  const ticketPackages = jsonInvoice.packages || [];
+  const ticketPackageIds = new Set(ticketPackages.flatMap((p) => (p.itemIds || []).map(normalizeItemId)));
+  for (const pkg of rvPackages) {
+    if (pairs.some((p) => p.pkg === pkg)) continue;
+    const members = (pkg.itemIds || [])
+      .map((id) => mssqlItems.find((it) => normalizeItemId(it.itemId) === normalizeItemId(id)))
+      .filter(Boolean);
+    // A package the Ticket lists piece by piece is paired up in diffPackages.
+    if (members.some((m) => ticketPackageIds.has(normalizeItemId(m.itemId)))) continue;
+    if (!members.length && ticketPackages.some((p) => eqNum(p.price, pkg.price))) continue;
+
+    const pieceWords = new Set(productBag(...members.flatMap((m) => [m.ven, m.sku, m.cover, m.grade])));
+    let best = null;
+    for (const line of jsonItems) {
+      if (takenLines.has(line) || line.packageKey) continue;
+      const id = normalizeItemId(line.itemId);
+      if (id && rvItemIds.has(id)) continue;   // RV sells it as an ordinary line
+      const words = productBag(line.sku, line.cover, line.grade);
+      const coverage = (words.length && pieceWords.size)
+        ? words.filter((w) => pieceWords.has(w)).length / words.length
+        : 0;
+      const priceOk = eqNum(line.extendedPrice, pkg.price);
+      if (coverage < 0.6 && !priceOk) continue;
+      const score = coverage + (priceOk ? 1 : 0);
+      if (!best || score > best.score) best = { line, coverage, score };
+    }
+    if (!best) continue;
+    pairs.push({ pkg, line: best.line, bare: '', coverage: best.coverage });
+    takenLines.add(best.line);
+  }
+
+  for (const { pkg, line, bare, coverage } of pairs) {
     link.matchedRvPackages.add(pkg.key);
     link.jsonConsumed.add(itemKey(line));
     link.jsonIds.push(String(line.itemId));
@@ -282,7 +333,9 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
     // Carry the line's own detail onto it — this is the only place the Ticket
     // describes the product, and the line itself is kept out of the item list
     // so it isn't shown twice.
-    let derived = (jsonInvoice.packages || []).find((p) => packageBareId(p.key) === bare) || null;
+    let derived = bare
+      ? ((jsonInvoice.packages || []).find((p) => packageBareId(p.key) === bare) || null)
+      : null;
     if (!derived) {
       derived = {
         key: normalizeItemId(line.itemId),
@@ -310,12 +363,27 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
       pushDiff(out, 'packages', `${label}/price`, ticketPrice, pkg.price);
       markDiff();
     }
-    const jBag = productBag(line.sku, line.cover, line.grade, line.ven);
-    const mBag = productBag(pkg.label);
-    if (jBag.length && mBag.length && !bagsEqual(jBag, mBag)) {
-      pushDiff(out, 'packages', `${label}/sku`,
-        [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pkg.label);
-      markDiff();
+    if (bare) {
+      const jBag = productBag(line.sku, line.cover, line.grade, line.ven);
+      const mBag = productBag(pkg.label);
+      if (jBag.length && mBag.length && !bagsEqual(jBag, mBag)) {
+        pushDiff(out, 'packages', `${label}/sku`,
+          [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pkg.label);
+        markDiff();
+      }
+    } else if (coverage < 0.6) {
+      // Paired on price alone: RV's label is only "PACKAGE SALE", so the
+      // pieces are the only product text there is to hold the line against.
+      const pieces = (pkg.itemIds || [])
+        .map((id) => mssqlItems.find((it) => normalizeItemId(it.itemId) === normalizeItemId(id)))
+        .filter(Boolean)
+        .map((m) => [m.ven, m.sku].filter(Boolean).join(' '))
+        .join(' + ');
+      if (pieces) {
+        pushDiff(out, 'packages', `${label}/sku`,
+          [line.ven, line.sku, line.cover].filter(Boolean).join(' '), pieces);
+        markDiff();
+      }
     }
   }
   return link;
