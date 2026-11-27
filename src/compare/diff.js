@@ -46,8 +46,14 @@ function diffCustomer(a, b, out) {
 }
 
 function diffAddressBlock(a, b, group, out) {
-  if (!eqAddr(a.address, b.address))   pushDiff(out, 'customer', `${group}.address`,  a.address,  b.address);
-  if (!eqAddr(a.address2, b.address2)) pushDiff(out, 'customer', `${group}.address2`, a.address2, b.address2);
+  // One side may type the unit on the street line ("1308 Old Spartanburg
+  // Road, Apt 127") where the other uses the second line for it. The address
+  // is the same, so compare the two lines as one before judging them apart.
+  const whole = (x) => [x.address, x.address2].filter(Boolean).join(' ');
+  if (!eqAddr(whole(a), whole(b))) {
+    if (!eqAddr(a.address, b.address))   pushDiff(out, 'customer', `${group}.address`,  a.address,  b.address);
+    if (!eqAddr(a.address2, b.address2)) pushDiff(out, 'customer', `${group}.address2`, a.address2, b.address2);
+  }
   if (!eqCity(a.city, b.city))         pushDiff(out, 'customer', `${group}.city`,     a.city,     b.city);
   if (!eqStr(a.state, b.state))        pushDiff(out, 'customer', `${group}.state`,    a.state,    b.state);
   if (!eqStr(a.zip, b.zip))            pushDiff(out, 'customer', `${group}.zip`,      a.zip,      b.zip);
@@ -58,7 +64,20 @@ function diffDates(a, b, out) {
   // Single delivery comparison. Both sides have already collapsed pickup_asap
   // into the literal "ASAP" marker, so pickup-orders match without special
   // casing here.
-  if (!eqStr(a.effective, b.effective)) pushDiff(out, 'dates', 'delivery', a.effective, b.effective);
+  if (!deliveryDatesAgree(a, b)) pushDiff(out, 'dates', 'delivery', a.effective, b.effective);
+}
+
+// "ASAP" and "today" are the same promise. A customer who collects on the day
+// of the sale is written up either way — the Ticket may say pickup on
+// 11/25 where RV says ASAP, or the Ticket says ASAP where RV's ASAP carries a
+// "Pickup Date - 11/25" remark — so neither is a mismatch.
+function deliveryDatesAgree(a, b) {
+  if (eqStr(a.effective, b.effective)) return true;
+  const asap = (d) => String(d.effective || '').toUpperCase() === 'ASAP';
+  const sameDay = (d) => Boolean(d.effective) && eqStr(d.effective, d.order);
+  if (asap(a) && (b.wasAsap || sameDay(b))) return true;
+  if (asap(b) && sameDay(a)) return true;
+  return false;
 }
 
 function diffTotals(a, b, out, opts = {}) {
@@ -123,7 +142,9 @@ function itemKey(it) {
 
 // Soft text match: ignore case, collapse whitespace, ignore inner punctuation.
 function softTextEqual(a, b) {
-  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // 8.5" and 8.5 INCH are the same measurement.
+  const norm = (s) => String(s || '').toLowerCase().replace(/(\d)\s*("|''|\bin\b\.?)/g, '$1 inch ')
+    .replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
   const na = norm(a);
   const nb = norm(b);
   if (!na || !nb) return na === nb;
@@ -174,6 +195,27 @@ function diffItems(jsonItems, mssqlItems, out, link = null) {
     if (!skipMssql.has(k)) mMap.set(k, it);
   }
 
+  // A generic "*" item id is shared by many products, so those lines are keyed
+  // on id + SKU text. When one side spells the product out more fully — the
+  // Ticket has "2240-30" with no cover, RV has "2240 30 TORI 1703 26" — the
+  // keys differ and each side reports the line missing. Where exactly one
+  // unmatched line on the other side continues the same text, they are the
+  // same line: pair them and let the field checks report what differs.
+  for (const [k, j] of jMap) {
+    if (mMap.has(k) || !k.includes('|')) continue;
+    const [starId, sig] = k.split('|');
+    if (!starId.startsWith('*') || !sig) continue;
+    const candidates = [...mMap.keys()].filter((mk) => {
+      if (jMap.has(mk) || !mk.startsWith(`${starId}|`)) return false;
+      const msig = mk.slice(starId.length + 1);
+      return Boolean(msig) && (msig.startsWith(sig) || sig.startsWith(msig));
+    });
+    if (candidates.length !== 1) continue;
+    const m = mMap.get(candidates[0]);
+    mMap.delete(candidates[0]);
+    mMap.set(k, m);
+  }
+
   const seen = new Set();
   for (const [k, j] of jMap) {
     seen.add(k);
@@ -184,14 +226,48 @@ function diffItems(jsonItems, mssqlItems, out, link = null) {
       continue;
     }
     if (!eqNum(j.qty, m.qty))                     pushDiff(out, 'items', `${label}/qty`, j.qty, m.qty);
+
+    // RV prints some lines with no vendor code, only the brand as the first
+    // word of the product — "ENGLANDER TITAN STEEL TWIN XL" for a line the
+    // Ticket has as vendor SOUT, SKU "ENGLANDER TITAN STEEL TWIN XL". Read
+    // naively the brand becomes RV's "vendor" and both vendor and SKU look
+    // wrong. When RV's vendor + SKU together are exactly the Ticket's SKU,
+    // there was no vendor on the RV line to compare.
+    const noVendorOnRv = !eqStr(j.ven, m.ven)
+      && bagsEqual(productBag(j.sku, j.cover, j.grade), productBag(m.ven, m.sku, m.cover, m.grade));
+    if (noVendorOnRv) {
+      if (!softTextEqual(j.description, m.description)) {
+        pushDiff(out, 'items', `${label}/description`, j.description, m.description);
+      }
+      continue;
+    }
     if (!eqStr(j.ven, m.ven))                     pushDiff(out, 'items', `${label}/ven`, j.ven, m.ven);
+
+    // The miscellaneous item is one RV stock line reused for anything not in
+    // the catalogue. RV prints it as "MISC / MISCELLANEOUS ITEM" and holds
+    // what was really sold in the line's remarks, so the Ticket's own words
+    // are looked for there instead of comparing SKU and description outright.
+    if (isMiscItem(m)) {
+      const generic = new Set(['misc', 'miscellaneous', 'item', 'cfc']);
+      const have = new Set(productBag(m.sku, m.description));
+      const missing = productBag(j.sku, j.cover, j.grade, j.description)
+        .filter((w) => !generic.has(w) && !have.has(w));
+      if (missing.length) {
+        pushDiff(out, 'items', `${label}/description`,
+          [j.sku, j.description].filter(Boolean).join(' '), m.description);
+      }
+      continue;
+    }
     // Treat sku + cover + grade as one bag of tokens per side. JSON may bake
     // the grade into the SKU string (e.g. "9B14 DP 22389 MUSHROOM") while RV
     // breaks it out as a separate column. Compare as multisets so ordering
     // and field-placement differences don't trigger a false mismatch.
     const jBag = productBag(j.sku, j.cover, j.grade);
     const mBag = productBag(m.sku, m.cover, m.grade);
-    if (!bagsEqual(jBag, mBag))                   pushDiff(out, 'items', `${label}/sku+cover`, [j.sku, j.cover, j.grade].filter(Boolean).join(' '), [m.sku, m.cover, m.grade].filter(Boolean).join(' '));
+    // Same text with the spaces in different places ("OT 1021" / "OT1021")
+    // is the same product code.
+    const run = (it) => [it.sku, it.cover, it.grade].filter(Boolean).join('').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!bagsEqual(jBag, mBag) && run(j) !== run(m)) pushDiff(out, 'items', `${label}/sku+cover`, [j.sku, j.cover, j.grade].filter(Boolean).join(' '), [m.sku, m.cover, m.grade].filter(Boolean).join(' '));
     if (!softTextEqual(j.description, m.description))
                                                   pushDiff(out, 'items', `${label}/description`, j.description, m.description);
     if (m.salePrice !== undefined && !eqNum(j.salePrice, m.salePrice))
@@ -204,6 +280,11 @@ function diffItems(jsonItems, mssqlItems, out, link = null) {
   for (const [k, m] of mMap) {
     if (!seen.has(k)) pushDiff(out, 'items', `missing-in-json:${itemLabel(m)}`, null, m);
   }
+}
+
+function isMiscItem(it) {
+  return /^MISC$/i.test(String(it.sku || '').trim())
+    || /^MISCELLANEOUS ITEM/i.test(String(it.description || '').trim());
 }
 
 function itemLabel(it) {
@@ -389,12 +470,69 @@ function linkTicketPackageLines(jsonInvoice, mssqlRecord, out) {
   return link;
 }
 
+// A furniture set the Ticket sells under one id and RV sells piece by piece.
+//
+// The Ticket line reads "B128 74/98/77 HUEY VINEYARD — BLACK QUEEN SLEIGH
+// BED" under the set's own item id; RV has no such item, only the footboard
+// "B128 74 …", headboard "B128 77 …" and rails "B128 98 …". Left alone that
+// is one line missing from RV and three missing from the Ticket, on a sale
+// where the two sides agree.
+//
+// A set is recognised by the slash group in its SKU. Its pieces are the RV
+// lines the Ticket doesn't have, from the same vendor and model, each carrying
+// one of the numbers in that group.
+function linkSetLines(jsonInvoice, mssqlRecord, link) {
+  const jsonItems = jsonInvoice.items || [];
+  const mssqlItems = mssqlRecord.items || [];
+  const ticketIds = new Set(jsonItems.map((it) => normalizeItemId(it.itemId)).filter(Boolean));
+  const rvIds = new Set(mssqlItems.map((it) => normalizeItemId(it.itemId)).filter(Boolean));
+  const words = (s) => String(s || '').toLowerCase().split(/[^a-z0-9/]+/).filter(Boolean);
+  link.setPieces = link.setPieces || new Map();
+
+  for (const line of jsonItems) {
+    const id = normalizeItemId(line.itemId);
+    if (!id || id.startsWith('*') || rvIds.has(id)) continue;       // RV sells it as it stands
+    if (link.jsonConsumed.has(itemKey(line))) continue;
+
+    const skuWords = words(line.sku);
+    const parts = skuWords.filter((w) => w.includes('/')).flatMap((w) => w.split('/')).filter(Boolean);
+    const model = skuWords.find((w) => !w.includes('/'));
+    if (parts.length < 2 || !model) continue;
+
+    const pieces = mssqlItems.filter((m) => {
+      const mid = normalizeItemId(m.itemId);
+      if (!mid || ticketIds.has(mid) || link.mssqlConsumed.has(itemKey(m))) return false;
+      if (!eqStr(m.ven, line.ven)) return false;
+      const mw = productBag(m.sku, m.cover, m.grade);
+      return mw.includes(model) && parts.some((p) => mw.includes(p));
+    });
+    if (pieces.length < 2) continue;
+
+    // Most of what the Ticket calls the set must be spelled out by the pieces.
+    const pieceWords = new Set(productBag(...pieces.flatMap((m) => [m.sku, m.cover, m.grade])));
+    const want = productBag(line.sku, line.cover, line.grade);
+    const covered = want.filter((w) => pieceWords.has(w)).length / want.length;
+    if (covered < 0.6) continue;
+
+    link.jsonConsumed.add(itemKey(line));
+    link.jsonIds.push(String(line.itemId));
+    for (const m of pieces) {
+      link.mssqlConsumed.add(itemKey(m));
+      link.mssqlIds.push(String(m.itemId));
+    }
+    link.setPieces.set(id, pieces.map((m) => normalizeItemId(m.itemId)));
+  }
+}
+
 function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
   const a = (jsonPackages || []).filter((p) => !p.bookedAsSingleLine);
   const b = (mssqlPackages || []).filter((p) => !(link && link.matchedRvPackages.has(p.key)));
   if (!a.length && !b.length) return;
 
-  const ids = (pkg) => new Set((pkg.itemIds || []).map(normalizeItemId).filter(Boolean));
+  // A set inside a package stands for its pieces when membership is compared.
+  const setPieces = (link && link.setPieces) || new Map();
+  const ids = (pkg) => new Set((pkg.itemIds || []).map(normalizeItemId).filter(Boolean)
+    .flatMap((id) => setPieces.get(id) || [id]));
   const overlap = (x, y) => {
     const sy = ids(y);
     let n = 0;
@@ -458,6 +596,9 @@ function diffDeliveryVia(jsonInvoice, mssqlRecord, out) {
   });
   if (expected === null) return; // pickup orders: rule doesn't apply
   const actual = String(mssqlRecord.deliveryVia || '').trim().toUpperCase();
+  // "Please see detail items" is RV saying the route is set line by line, so
+  // there is no single route on the sale to hold to the rule.
+  if (/SEE DETAIL ITEMS/.test(actual)) return;
   if (actual !== expected) {
     pushDiff(out, 'dates', 'deliveryVia', expected, actual || '(none)');
   }
@@ -491,6 +632,7 @@ function compare(jsonInvoice, mssqlRecord) {
   diffDates(jsonInvoice.dates, mssqlRecord.dates, out);
   diffTotals(jsonInvoice.totals, mssqlRecord.totals, out, { noTaxSale: jsonInvoice.noTaxSale });
   const pkgLink = linkTicketPackageLines(jsonInvoice, mssqlRecord, out);
+  linkSetLines(jsonInvoice, mssqlRecord, pkgLink);
   diffPackages(jsonInvoice.packages, mssqlRecord.packages, out, pkgLink);
   diffItems(jsonInvoice.items, mssqlRecord.items, out, pkgLink);
   return {

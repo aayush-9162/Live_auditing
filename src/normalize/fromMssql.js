@@ -98,7 +98,13 @@ function stripLeadingZeros(id) {
 
 function normalizeItem(row) {
   const { ven, sku, grade, cover } = parseSaleDesc(row.sale_desc);
-  const desc2 = trimAll(row.sale_desc2);
+  // A miscellaneous item prints only "MISC / MISCELLANEOUS ITEM"; what was
+  // actually sold is typed into the line's remarks. Carry that text on the
+  // description so the audit has something to hold the Ticket against.
+  const remarks = trimAll(row.__item_remarks);
+  const baseDesc = trimAll(row.sale_desc2);
+  const isMisc = /\bMISC\b/i.test(String(row.sale_desc || '')) || /^MISCELLANEOUS ITEM/i.test(baseDesc);
+  const desc2 = (isMisc && remarks) ? `${baseDesc} — ${remarks}` : baseDesc;
   const itemId = stripLeadingZeros(trimAll(row.sale_item));
 
   // For non-* itemIds (numeric stock items), the JSON stores the full product
@@ -209,8 +215,10 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
       const isAsap = String(rawDelivery || '').trim().toUpperCase() === 'ASAP';
       // A pickup is also recognisable from its delivery-via code, which is
       // what keeps `isPickup` right when a date has been recovered below.
+      // Only a real code counts ("P", "P2") — an unmapped route label such as
+      // "PLEASE SEE DETAIL ITEMS" merely starts with the same letter.
       const viaCode = trimAll(head.DeliveryVia).toUpperCase();
-      const isPickup = isAsap || viaCode.startsWith('P');
+      const isPickup = isAsap || /^P\d?$/.test(viaCode);
       // "ASAP" with an agreed date typed into the remarks: compare the date.
       const fromRemarks = normalizeDate(head.__pickup_date || '');
       const delivery = isAsap ? (fromRemarks || 'ASAP') : normalizeDate(rawDelivery);
@@ -221,6 +229,8 @@ function normalizeMssqlRows(headerRows, itemRows = []) {
         deliveryOption: '',
         effective: delivery,
         isPickup,
+        // RV's own date field said ASAP, whatever was recovered from remarks.
+        wasAsap: isAsap,
         dateFromRemarks: Boolean(isAsap && fromRemarks),
       };
     })(),

@@ -84,10 +84,22 @@ function compareReturn(jsonInvoice, mssqlRecord, ctx = {}) {
 
   const sameSale = Boolean(info.rvNumber) && info.rvNumber === rvNo;
   const hasReturnRows = editRows.concat(receiptRows || []).some((r) => Number(r.qty) < 0);
+
+  // The sale number written on a return ticket can be wrong — carried over
+  // from an earlier sale to the same customer. The ticket it returns from is
+  // the firmer link: if this RV sale holds most of what that ticket sold, it
+  // is the original sale, whatever number the return ticket quotes.
+  const originalIds = original
+    ? [...new Set((original.items || []).map((it) => bareId(it.itemId)).filter((id) => id && !id.startsWith('*')))]
+    : [];
+  const everOnRv = tally(editRows.concat(receiptRows || []));
+  const isOriginalSale = originalIds.length > 0
+    && originalIds.filter((id) => everOnRv.has(id)).length >= originalIds.length / 2;
+
   let mode;
   if (sameSale) mode = 'in-place';
   else if (hasReturnRows) mode = 'return-sale';
-  else if (info.rvNumber) mode = 'other-sale';
+  else if (info.rvNumber && !isOriginalSale) mode = 'other-sale';
   else mode = 'in-place';
 
   const audit = {
@@ -125,6 +137,9 @@ function compareReturn(jsonInvoice, mssqlRecord, ctx = {}) {
   }
 
   if (mode === 'in-place') {
+    // The return was made on the original sale, but the ticket quotes a
+    // different sale number for it.
+    if (info.rvNumber && !sameSale) pushDiff(out, 'customer', 'rvSaleNumber', info.rvNumber, rvNo);
     if (!eqStr(jsonInvoice.dates.order, mssqlRecord.dates.order)) {
       pushDiff(out, 'dates', 'order', jsonInvoice.dates.order, mssqlRecord.dates.order);
     }
@@ -325,6 +340,16 @@ function compareReturn(jsonInvoice, mssqlRecord, ctx = {}) {
     if (!totals.totalOk) pushDiff(out, 'totals', 'total', totals.expectedTotal, rv.total);
   }
   audit.totals = totals;
+
+  // A replacement line can carry a price the ticket's own return totals do
+  // not count (an even exchange left at list price). The totals are what the
+  // money check uses, so don't show the line's figure as if it were.
+  const addedLines = audit.lines.filter((l) => l.kind === 'added');
+  const addedSum = r2(addedLines.reduce((a, l) => a + (Number(l.value) || 0), 0));
+  if (addedLines.length && !eqNum(addedSum, newItemsValue, 0.02)) {
+    for (const l of addedLines) delete l.value;
+    audit.notes.push(`The replacement line${addedLines.length > 1 ? 's are' : ' is'} priced at $${addedSum.toFixed(2)} on the ticket, but the ticket's return totals count $${newItemsValue.toFixed(2)} for ${addedLines.length > 1 ? 'them' : 'it'}.`);
+  }
 
   if (newCharges > 0 && subtotalOk) {
     audit.notes.push(chargesIncluded

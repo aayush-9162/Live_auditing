@@ -57,6 +57,8 @@ const STREET_TYPES = {
   route: 'rte',          rte: 'rte',
   thruway: 'thwy',       thwy: 'thwy',
   turnpike: 'tpk',       tpk: 'tpk',
+  // Not on the sheet, but in use on tickets ("393 Carver Mountain Vly").
+  valley: 'vly',         vly: 'vly',
 };
 
 const DIRECTIONALS = {
@@ -79,25 +81,38 @@ const UNIT_TYPES = {
   room: 'rm',       rm: 'rm',
 };
 
-function canonicalAddress(input) {
-  if (!input) return '';
+function canonicalTokens(input, { directionals = true } = {}) {
+  if (!input) return [];
   let s = String(input).toLowerCase();
   // strip punctuation except the # used in unit numbers
   s = s.replace(/[.,]/g, ' ');
   s = s.replace(/#/g, ' # ');
   s = s.replace(/\s+/g, ' ').trim();
+  if (!s) return [];
 
-  const tokens = s.split(' ').map((tok) => {
-    if (STREET_TYPES[tok]) return STREET_TYPES[tok];
-    if (DIRECTIONALS[tok]) return DIRECTIONALS[tok];
-    if (UNIT_TYPES[tok]) return UNIT_TYPES[tok];
+  return s.split(' ').map((tok) => {
+    if (Object.hasOwn(STREET_TYPES, tok)) return STREET_TYPES[tok];
+    if (directionals && Object.hasOwn(DIRECTIONALS, tok)) return DIRECTIONALS[tok];
+    if (Object.hasOwn(UNIT_TYPES, tok)) return UNIT_TYPES[tok];
     return tok;
   });
-  return tokens.join(' ');
 }
 
+function canonicalAddress(input) {
+  return canonicalTokens(input).join(' ');
+}
+
+// Equal once abbreviations are levelled — or differing only in where the
+// spaces fall, as in "321 East View Dr" against "321 Eastview Drive". For
+// that second test the words are run together, with "East" left spelled out
+// so it still lines up with the "east" inside "Eastview".
 function addressEqual(a, b) {
-  return canonicalAddress(a) === canonicalAddress(b);
+  if (canonicalAddress(a) === canonicalAddress(b)) return true;
+  const ta = canonicalTokens(a, { directionals: false });
+  const tb = canonicalTokens(b, { directionals: false });
+  // Only words may run together — "1 2 Oak Rd" is not "12 Oak Rd".
+  const numbers = (t) => t.filter((w) => /\d/.test(w)).join(' ');
+  return numbers(ta) === numbers(tb) && ta.join('') === tb.join('');
 }
 
 // Fuzzy match: same canonical OR one is a prefix/suffix of the other. Useful

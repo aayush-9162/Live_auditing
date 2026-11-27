@@ -34,6 +34,10 @@ function normalizePhone(s) {
   return digits;
 }
 
+function blankIfNone(s) {
+  return /^(n\/?a|none|-+)$/i.test(String(s || '').trim()) ? '' : s;
+}
+
 function normalizeInvoice(rec) {
   const fj = rec.form_json || {};
   const bill = fj.billTo || {};
@@ -93,13 +97,23 @@ function normalizeInvoice(rec) {
         : round2(returned.reduce((a, r) => a + r.extendedPrice * r.returnQty, 0));
       // Includes a delivery fee or care plan handed back with the items.
       const returnedValue = sum.returnedValue !== undefined ? toNumber(sum.returnedValue) : returnedItemsValue;
-      const newItemsValue = round2(items.filter((it) => !isReturnLine(it))
-        .reduce((a, it) => a + toNumber(it.extendedPrice) * (toNumber(it.qty) || 1), 0));
-      // rtsSubtotal is the replacement items plus any delivery / care-plan
-      // charge the ticket puts on the return itself.
-      const newCharges = sum.rtsSubtotal !== undefined
-        ? Math.max(0, round2(toNumber(sum.rtsSubtotal) - newItemsValue))
-        : 0;
+      // rtsSubtotal is the replacement items plus the return's delivery and
+      // care-plan figures, so the replacement value is what is left once
+      // those come off. (A replacement line's own price can't be trusted for
+      // this: on an even exchange it is left at list price.)
+      const rtsDelivery = toNumber(rts.deliveryCharge);
+      const rtsCare = toNumber(rts.carePlanCharge);
+      const newItemsValue = sum.rtsSubtotal !== undefined
+        ? Math.max(0, round2(toNumber(sum.rtsSubtotal) - rtsDelivery - rtsCare))
+        : round2(items.filter((it) => !isReturnLine(it))
+          .reduce((a, it) => a + toNumber(it.extendedPrice) * (toNumber(it.qty) || 1), 0));
+      // Charges the return itself adds. "Same as original" means the figure
+      // is just the original sale's fee carried over, not a new one.
+      const sameAsOriginal = (v) => v === true || String(v) === 'true';
+      const newCharges = round2(
+        (sameAsOriginal(rts.deliverySameAsOriginal) ? 0 : rtsDelivery)
+        + (sameAsOriginal(rts.carePlanContinue) ? 0 : rtsCare),
+      );
 
       return {
         originalInvoiceSlug: toStr(fj.originalInvoiceSlug),
@@ -151,14 +165,19 @@ function normalizeInvoice(rec) {
       const pickupDate   = normalizeDate(fj.pickupDate)   || nested('pickup');
       const opt          = toStr(fj.deliveryOption).toLowerCase();
       // Both pickup_asap and delivery_asap map to RV's "ASAP" marker.
-      const isAsap   = opt === 'pickup_asap' || opt === 'delivery_asap';
-      const isPickup = opt.startsWith('pickup');
+      // No delivery option and no date at all: the customer carried the
+      // goods out of the store ("took with"). RV books that as a store
+      // pickup, ASAP, so it is compared as one — not as a delivery that is
+      // missing its date.
+      const tookWith = !opt && !deliveryDate && !pickupDate;
+      const isAsap   = tookWith || opt === 'pickup_asap' || opt === 'delivery_asap';
+      const isPickup = tookWith || opt.startsWith('pickup');
       const effective = isAsap ? 'ASAP' : (deliveryDate || pickupDate);
       return {
         order: normalizeDate(fj.orderDate),
         delivery: deliveryDate,
         pickup: pickupDate,
-        deliveryOption: opt,
+        deliveryOption: tookWith ? 'took_with' : opt,
         effective,
         isPickup,
         isAsap,
@@ -230,8 +249,9 @@ function normalizeInvoice(rec) {
         qty: toNumber(it.qty),
         ven: toStr(it.ven),
         sku: toStr(it.sku),
-        grade: toStr(it.gradeOverride || it.grade),
-        cover: toStr(it.coverOverride || it.cover),
+        // "NA" / "N/A" typed into a required box means there is none.
+        grade: blankIfNone(toStr(it.gradeOverride || it.grade)),
+        cover: blankIfNone(toStr(it.coverOverride || it.cover)),
         description: toStr(it.descriptionOverride || it.description),
         salePrice: toNumber(it.salePrice),
         extendedPrice: toNumber(it.extendedPrice),

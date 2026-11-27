@@ -487,7 +487,7 @@ function renderAudit(data) {
         <button id="toggleMatched" class="ghost small-btn" title="Toggle visibility of matched fields">
           ${hideMatchedRows ? 'Show all fields' : 'Hide matched fields'}
         </button>
-        ${deliveryViaBadge(mssql.deliveryVia, data.expectedDeliveryVia)}
+        ${deliveryViaBadge(mssql.deliveryVia, ret ? null : data.expectedDeliveryVia)}
         ${status}
       </div>
     </div>
@@ -508,7 +508,7 @@ function renderAudit(data) {
       ${chip('Totals',   grpCount('totals'))}
       ${chip('Items',    grpCount('items'))}
       ${(cardJson.packages || []).length || (cardRv.packages || []).length ? chip('Packages', grpCount('packages')) : ''}
-      ${viaChip(mssql.deliveryVia, data.expectedDeliveryVia)}
+      ${viaChip(mssql.deliveryVia, ret ? null : data.expectedDeliveryVia)}
       ${gmChip(mssql.totals)}
     </div>
 
@@ -650,7 +650,7 @@ function renderRvViewer(rv, diffs = [], sellers = []) {
   const vanLabel = (() => {
     if (!deliveryVia) return '';
     const c = deliveryVia.toUpperCase();
-    const kind = c.startsWith('P') ? 'Pickup' : (c.startsWith('D') ? 'Delivery' : '');
+    const kind = viaKind(c) === 'pickup' ? 'Pickup' : (viaKind(c) === 'delivery' ? 'Delivery' : '');
     const when = deliveryDate ? ` — ${deliveryDate}` : '';
     return kind ? `${kind} ${c}${when}` : `${c}${when}`;
   })();
@@ -860,8 +860,8 @@ function renderRvViewer(rv, diffs = [], sellers = []) {
 // a delivery-date mismatch with the Ticket side.
 function renderDateInfo(date, via, isMismatch) {
   const code = String(via || '').trim().toUpperCase();
-  const isPickup = code.startsWith('P');
-  const isDelivery = code.startsWith('D');
+  const isPickup = viaKind(code) === 'pickup';
+  const isDelivery = viaKind(code) === 'delivery';
   const cls = isMismatch ? 'rv-mismatch-text' : '';
   const delivVal = isDelivery ? (date || '—') : '—';
   const pickupVal = isPickup  ? (date || '—') : '—';
@@ -931,13 +931,26 @@ function chip(label, count) {
 
 // Same delivery-route information as the header badge, rendered as a summary
 // chip so it sits alongside the other counts.
+// What an RV DeliveryVia value is. Only a real code is a pickup ("P") or a
+// delivery route ("D", "D2", "D5"); anything else is a label RV printed that
+// the app could not turn into a code — "PLEASE SEE DETAIL ITEMS", say, which
+// starts with a P but is no pickup.
+function viaKind(via) {
+  const code = String(via || '').trim().toUpperCase();
+  if (/^P\d?$/.test(code)) return 'pickup';
+  if (/^D\d?$/.test(code)) return 'delivery';
+  return code ? 'other' : '';
+}
+
 function viaChip(via, expected) {
   if (!via && !expected) return '';
   const code = String(via || '').trim().toUpperCase();
   const exp  = expected ? String(expected).trim().toUpperCase() : null;
-  const isDelivery = (code || exp || '').startsWith('D');
-  const label = isDelivery ? '🚚 Delivery via' : '🏬 Pickup at';
-  const mismatch = exp && code && exp !== code;
+  const kind = viaKind(code);
+  const isDelivery = kind ? kind === 'delivery' : String(exp || '').startsWith('D');
+  const label = kind === 'other' ? '🧾 RV route' : (isDelivery ? '🚚 Delivery via' : '🏬 Pickup at');
+  // A route RV leaves to the item lines can't be held to the rule.
+  const mismatch = kind !== 'other' && exp && code && exp !== code;
   const cls = mismatch ? 'error' : (exp && code ? 'ok' : '');
   const title = mismatch
     ? `expected ${exp} by the delivery-via rules`
@@ -1172,10 +1185,11 @@ function deliveryViaBadge(via, expected) {
   if (!via && !expected) return '';
   const code = String(via || '').trim().toUpperCase();
   const exp  = expected ? String(expected).trim().toUpperCase() : null;
-  const isDelivery = (code || exp || '').startsWith('D');
-  const icon = isDelivery ? '🚚' : '🏬';
-  const label = isDelivery ? 'Delivery via' : 'Pickup at';
-  const mismatch = exp && code && exp !== code;
+  const kind = viaKind(code);
+  const isDelivery = kind ? kind === 'delivery' : String(exp || '').startsWith('D');
+  const icon = kind === 'other' ? '🧾' : (isDelivery ? '🚚' : '🏬');
+  const label = kind === 'other' ? 'RV route' : (isDelivery ? 'Delivery via' : 'Pickup at');
+  const mismatch = kind !== 'other' && exp && code && exp !== code;
   const match    = exp && code && exp === code;
   const cls = mismatch ? 'via-mismatch' : (match ? 'via-ok' : (isDelivery ? 'via-delivery' : 'via-pickup'));
 
@@ -1200,11 +1214,12 @@ function deliveryViaBadge(via, expected) {
 function deliveryRowFor(d, side, rec) {
   const tag = side === 'json' ? deliveryTypeTag(d) : '';
   const via = side === 'mssql' ? String(rec.deliveryVia || '').toUpperCase() : '';
-  const isPickup = side === 'json'
+  const kind = viaKind(via);
+  const isPickup = (side === 'json' || kind === 'other')
     ? !!(d && d.isPickup)
-    : via.startsWith('P');
+    : kind === 'pickup';
   const label = isPickup ? 'Pickup' : 'Delivery';
-  const viaBadge = via ? ` <span class="row-via-badge ${via.startsWith('P') ? 'via-pickup-inline' : 'via-delivery-inline'}">${esc(via)}</span>` : '';
+  const viaBadge = via ? ` <span class="row-via-badge ${isPickup ? 'via-pickup-inline' : 'via-delivery-inline'}">${esc(via)}</span>` : '';
   return ['dates/delivery', label, d.effective, tag + viaBadge, isPickup ? 'k-bold' : ''];
 }
 
@@ -1216,7 +1231,9 @@ function deliveryTypeTag(d) {
     case 'pickup_on_date':     label = 'pickup';      cls = 'tag-pickup'; break;
     case 'delivery_asap':      label = 'ASAP';        cls = 'tag-delivery'; break;
     case 'delivery_scheduled': label = 'scheduled';   cls = 'tag-delivery'; break;
-    default:                   label = d.deliveryOption; cls = '';
+    case 'delivery_special':   label = 'special';     cls = 'tag-delivery'; break;
+    case 'took_with':          label = 'took with';   cls = 'tag-pickup'; break;
+    default:                  label = d.deliveryOption; cls = '';
   }
   return ` <span class="opt-tag ${cls}">${esc(label)}</span>`;
 }

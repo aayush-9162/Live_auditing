@@ -322,12 +322,22 @@ function parseItems(lines, from, to, anchors) {
     };
 
     const desc2Parts = [];
+    const remarkParts = [];
     let mainDone = false;
+    let inRemarks = false;
 
     for (let i = block.start + 1; i < block.end; i++) {
       const line = lines[i];
       if (!line.cells.length) continue;
       if (lineHas(line, 'COMMISSION CODE:')) continue;
+
+      // "------ SALES ITEM REMARKS -----   NOTE: THIS REMARK WILL PRINT ON…"
+      // opens free text typed against the line, which runs to the end of the
+      // block. It is not part of the description — but on a miscellaneous
+      // item it is the only place RV says what was actually sold
+      // ("LOC:S1, ITEM:- BLUE 180 , ITEM DESC:- LIBERTY DRESSER").
+      if (/SALES ITEM REMARKS/i.test(line.text)) { inRemarks = true; continue; }
+      if (inRemarks) { remarkParts.push(line.text.trim()); continue; }
 
       const first = line.cells[0];
 
@@ -357,6 +367,7 @@ function parseItems(lines, from, to, anchors) {
     }
 
     item.sale_desc2 = clean(desc2Parts.join(' '));
+    item.__item_remarks = clean(remarkParts.join(' '));
     items.push(item);
   });
 
@@ -604,6 +615,14 @@ function linkPackageMembers(rows) {
     pkg.__member_item_ids = members.map((m) => m.sale_item);
   };
 
+  // Delivery and care-plan lines are charged on top of a package, never
+  // inside one, but they can be printed between a roll-up and its lines.
+  const isFee = (row) => {
+    const d = String(row.sale_desc || '').toUpperCase();
+    return /^CFC\b.*\b(DELIVERY|SETUP|SHIP|HANDLING|FREIGHT)\b/.test(d)
+      || /^USLD\b.*\b(SVC|CARE|WARRANTY)\b/.test(d);
+  };
+
   // The roll-up row normally sits above its component lines.
   for (let i = 0; i < rows.length; i++) {
     const pkg = rows[i];
@@ -613,6 +632,7 @@ function linkPackageMembers(rows) {
     const members = [];
     let sum = 0;
     for (let j = i + 1; j < rows.length && !rows[j].__is_package; j++) {
+      if (isFee(rows[j])) continue;
       sum += Number(rows[j].sale_price) || 0;
       members.push(rows[j]);
       if (Math.abs(sum - target) < 0.01) break;
@@ -634,11 +654,43 @@ function linkPackageMembers(rows) {
     const members = [];
     let sum = 0;
     for (let j = i - 1; j >= 0 && !rows[j].__is_package && !rows[j].__package_of; j--) {
+      if (isFee(rows[j])) continue;
       sum += Number(rows[j].sale_price) || 0;
       members.unshift(rows[j]);
       if (Math.abs(sum - target) < 0.01) break;
     }
     if (target > 0 && Math.abs(sum - target) < 0.01) claim(pkg, members);
+  }
+
+  // Or all the roll-ups come last, after every line on the sale, with nothing
+  // to say which lines each one covers ("…nightstand, sectional ×2,
+  // nightstand, bed ×3, *PKG 2,050.00, *PKG 900.00"). The lines of a package
+  // are still printed together, so look for the one unbroken run of unclaimed
+  // lines that adds up to the package price — the nearest above it if there
+  // is more than one.
+  for (let i = 0; i < rows.length; i++) {
+    const pkg = rows[i];
+    if (!pkg.__is_package || pkg.__member_item_ids.length) continue;
+    const target = Number(pkg.sale_price) || 0;
+    if (target <= 0) continue;
+
+    const runs = [];
+    for (let start = 0; start < rows.length; start++) {
+      let sum = 0;
+      const members = [];
+      for (let j = start; j < rows.length; j++) {
+        const row = rows[j];
+        if (row.__is_package || row.__package_of) break;
+        if (isFee(row)) { if (!members.length) break; continue; }
+        sum += Number(row.sale_price) || 0;
+        members.push(row);
+        if (Math.abs(sum - target) < 0.01) { runs.push({ end: j, members: members.slice() }); break; }
+        if (sum > target + 0.01) break;
+      }
+    }
+    if (!runs.length) continue;
+    const above = runs.filter((r) => r.end < i).sort((a, b) => b.end - a.end)[0];
+    claim(pkg, (above || runs[0]).members);
   }
 }
 

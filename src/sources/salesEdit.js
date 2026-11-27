@@ -228,6 +228,10 @@ const SALES_ROOT_IDS = (process.env.SALES_ROOT_FOLDER_IDS || '')
   .split(',').map((x) => x.trim()).filter(Boolean);
 const salesRoots = () => (SALES_ROOT_IDS.length ? SALES_ROOT_IDS : DEFAULT_SALES_ROOTS);
 
+// How many of one customer's sale folders are offered to the audit to choose
+// between. Each extra one costs a folder listing, and a download if tried.
+const MAX_SALE_CANDIDATES = 3;
+
 const FOLDER_TTL_MS = 60 * 1000;
 const childCache = new Map();          // folderId -> { at, items }
 
@@ -323,8 +327,41 @@ function pickCandidates(items, customerName) {
   const fallback = surnameOnlyCandidates(items, customerName);
   if (fallback.length) {
     console.log(`sales-edit: "${customerName}" matched "${fallback[0].name}" on surname alone`);
+    return fallback;
   }
-  return fallback;
+
+  const near = misspeltSurnameCandidates(items, customerName);
+  if (near.length) {
+    console.log(`sales-edit: "${customerName}" matched "${near[0].name}" allowing one wrong letter in the surname`);
+  }
+  return near;
+}
+
+// True when two words differ by a single letter — one changed, added or
+// dropped ("CARVER" / "CARTER", "MCGILLIN" / "MCGILLEN").
+function oneLetterApart(a, b) {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  const [longer, shorter] = a.length > b.length ? [a, b] : [b, a];
+  return longer.slice(i + 1) === shorter.slice(i);
+}
+
+// The folder is typed by hand, and a surname can come out one letter wrong:
+// the Ticket's "Nida Carver" was filed as "2329780 NIDA CARTER". Accept that
+// when the first name matches exactly and only one folder fits. As with the
+// surname-only match, the audit's own name check still shows the difference.
+function misspeltSurnameCandidates(items, customerName) {
+  const want = nameTokens(customerName);
+  const last = want[want.length - 1];
+  const first = want[0];
+  if (want.length < 2 || !last || last.length < 5 || first.length < 2) return [];
+  const hits = items.filter((f) => {
+    const have = nameTokens(f.name);
+    return have.includes(first) && have.some((t) => oneLetterApart(t, last));
+  });
+  return hits.length === 1 ? hits : [];
 }
 
 function folderMatchesCustomer(folderName, customerName) {
@@ -394,11 +431,16 @@ async function findInDayFolder(customerName, store, date, opts = {}) {
   const loose = pickCandidates(salesEditPdfs(kids, customerName), customerName)[0];
   if (loose) return { ...loose, folderName: folder.name, dayFolder: folder.name };
 
+  // A customer can have more than one sale folder on the day ("1315600 MARK
+  // OTT" and "1315610 MARK OTT"). The first is returned as before; the rest
+  // ride along so the audit can pick the one that is actually this ticket's.
+  const hits = [];
   for (const sub of pickCandidates(kids.filter(isDir), customerName)) {
     const hit = salesEditPdfs(await listChildren(sub.id, opts), customerName)[0];
-    if (hit) return { ...hit, folderId: sub.id, folderName: sub.name, dayFolder: folder.name };
+    if (hit) hits.push({ ...hit, folderId: sub.id, folderName: sub.name, dayFolder: folder.name });
+    if (hits.length >= MAX_SALE_CANDIDATES) break;
   }
-  return null;
+  return hits.length ? { ...hits[0], alternates: hits.slice(1) } : null;
 }
 
 // Sales that have moved out of their day folder into one of the flat roots.
@@ -412,11 +454,13 @@ async function findViaFolder(customerName, opts = {}) {
       console.warn(`sales-edit: could not list root ${root}: ${e.message}`);
     }
   }
+  const hits = [];
   for (const folder of pickCandidates(folders, customerName)) {
     const hit = salesEditPdfs(await listChildren(folder.id, opts), customerName)[0];
-    if (hit) return { ...hit, folderId: folder.id, folderName: folder.name };
+    if (hit) hits.push({ ...hit, folderId: folder.id, folderName: folder.name });
+    if (hits.length >= MAX_SALE_CANDIDATES) break;
   }
-  return null;
+  return hits.length ? { ...hits[0], alternates: hits.slice(1) } : null;
 }
 
 // Pull the RV sale number out of a folder name like "1309070 JEFF GIUNTA" or

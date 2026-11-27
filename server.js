@@ -88,6 +88,20 @@ async function findReturnsFor(rec, sameDay, date, folder) {
   return found.sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.id - b.id);
 }
 
+// Is this RV sale the one the ticket was written for? Used only to choose
+// between several sales on file for the same customer. A sale ticket's sale
+// has the ticket's total; a return ticket's is either the sale it names or a
+// sale carrying return (negative) lines.
+function saleFitsTicket(sale, jsonNorm) {
+  const header = (sale && sale.header) || {};
+  if (jsonNorm.isReturn) {
+    const wanted = String((jsonNorm.returnInfo && jsonNorm.returnInfo.rvNumber) || '').trim();
+    if (wanted && wanted === String(header.SalesNo || '').trim()) return true;
+    return (sale.items || []).some((row) => Number(row.sale_qty) < 0);
+  }
+  return Math.abs((Number(header.SaleTotalAmt) || 0) - (Number(jsonNorm.totals.total) || 0)) < 0.01;
+}
+
 // Compare two phone strings by their last 10 digits (US numbers; ignores
 // formatting and leading country code).
 function phonesMatch(a, b) {
@@ -432,6 +446,19 @@ app.get('/api/audit', async (req, res) => {
         code: e.code,
         json: jsonNorm,
       });
+    }
+
+    // The lookup goes by customer name, so a customer with two sales on file
+    // comes back as the most recent one for both tickets. When that one is
+    // plainly not this ticket's sale and there are others, take the one that
+    // is.
+    if ((file.alternates || []).length && !saleFitsTicket(sale, jsonNorm)) {
+      for (const alt of file.alternates) {
+        try {
+          const other = await loadSalesEdit(alt);
+          if (saleFitsTicket(other, jsonNorm)) { file = alt; sale = other; break; }
+        } catch (e) { /* unreadable alternate — keep what we have */ }
+      }
     }
 
     const header = sale.header;
