@@ -95,11 +95,11 @@ function readEmail(lines, blockEnd) {
     const cells = lines[i].cells;
     if (!cells.some((c) => c.str.includes('@'))) continue;
 
-    const whole = cells.find((c) => EMAIL_RE.test(c.str.trim()));
-    if (whole) return whole.str.trim().toLowerCase();
-
-    // The PDF writer sometimes breaks one printed word into several runs (it
-    // does so for the sale date), so also try runs that touch end to end.
+    // The PDF writer can break one printed word into several runs — it does
+    // so where letters meet digits, so "jacobzjordan326@gmail.com" arrives as
+    // "jacobzjordan" + "326@gmail.com". The second half is a valid address on
+    // its own, so join runs that touch end to end before looking, and take
+    // the longest address found.
     let run = '';
     let lastEnd = null;
     const runs = [];
@@ -109,8 +109,10 @@ function readEmail(lines, blockEnd) {
       lastEnd = c.xEnd;
     }
     runs.push(run);
-    const joined = runs.find((r) => EMAIL_RE.test(r));
-    if (joined) return joined.toLowerCase();
+    const found = runs.concat(cells.map((c) => c.str.trim()))
+      .filter((r) => EMAIL_RE.test(r))
+      .sort((a, b) => b.length - a.length)[0];
+    if (found) return found.toLowerCase();
   }
   return '';
 }

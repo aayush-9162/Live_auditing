@@ -201,19 +201,37 @@ function diffItems(jsonItems, mssqlItems, out, link = null) {
   // keys differ and each side reports the line missing. Where exactly one
   // unmatched line on the other side continues the same text, they are the
   // same line: pair them and let the field checks report what differs.
-  for (const [k, j] of jMap) {
-    if (mMap.has(k) || !k.includes('|')) continue;
-    const [starId, sig] = k.split('|');
-    if (!starId.startsWith('*') || !sig) continue;
-    const candidates = [...mMap.keys()].filter((mk) => {
-      if (jMap.has(mk) || !mk.startsWith(`${starId}|`)) return false;
-      const msig = mk.slice(starId.length + 1);
-      return Boolean(msig) && (msig.startsWith(sig) || sig.startsWith(msig));
-    });
-    if (candidates.length !== 1) continue;
-    const m = mMap.get(candidates[0]);
-    mMap.delete(candidates[0]);
-    mMap.set(k, m);
+  //
+  // The same happens when RV writes the line its own way: the Ticket's
+  // "4T00-05", grade F, cover PEYNAV is RV's "4T00 05 FK GF PEYNAV". So the
+  // leftover lines under one generic id are matched on how much of the
+  // Ticket's SKU (the model and piece number) RV's text carries, best first.
+  const starOf = (k) => (k.startsWith('*') ? k.split('|')[0] : '');
+  const looseJ = [...jMap.keys()].filter((k) => starOf(k) && !mMap.has(k));
+  const looseM = [...mMap.keys()].filter((k) => starOf(k) && !jMap.has(k));
+  const scored = [];
+  for (const kj of looseJ) {
+    for (const km of looseM) {
+      if (starOf(kj) !== starOf(km)) continue;
+      const j = jMap.get(kj);
+      const m = mMap.get(km);
+      const rvWords = new Set(productBag(m.sku, m.cover, m.grade));
+      const skuHits = productBag(j.sku).filter((w) => rvWords.has(w)).length;
+      if (!skuHits) continue;
+      const allHits = productBag(j.sku, j.cover, j.grade).filter((w) => rvWords.has(w)).length;
+      scored.push({ kj, km, score: skuHits * 10 + allHits });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const usedJ = new Set();
+  const usedM = new Set();
+  for (const { kj, km } of scored) {
+    if (usedJ.has(kj) || usedM.has(km)) continue;
+    usedJ.add(kj);
+    usedM.add(km);
+    const m = mMap.get(km);
+    mMap.delete(km);
+    mMap.set(kj, m);
   }
 
   const seen = new Set();
@@ -258,6 +276,31 @@ function diffItems(jsonItems, mssqlItems, out, link = null) {
       }
       continue;
     }
+    // A generic "*" line is free text on both sides, and RV's carries extras
+    // the Ticket never has (a frame-kit code, the grade as "GF"). What matters
+    // is that everything the Ticket says is there on RV: model, piece, cover,
+    // and the grade letter.
+    if (normalizeItemId(j.itemId).startsWith('*')) {
+      const rvWords = productBag(m.sku, m.cover, m.grade);
+      const rvRun = [m.ven, m.sku, m.cover, m.grade].filter(Boolean).join('').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const onRv = (w) => rvWords.includes(w) || (w.length >= 3 && rvRun.includes(w));
+      const gradeOnRv = (g) => rvWords.some((w) => w === g || (w.length === g.length + 1 && w.endsWith(g)));
+      // Spaces can fall differently ("OT 1021" / "OT1021"): if the Ticket's
+      // text run together sits inside RV's, every word of it is there.
+      const ticketRun = [j.sku, j.cover].filter(Boolean).join('').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const textOnRv = Boolean(ticketRun) && rvRun.includes(ticketRun);
+      const missing = (textOnRv ? [] : productBag(j.sku, j.cover).filter((w) => !onRv(w)))
+        .concat(productBag(j.grade).filter((g) => !gradeOnRv(g)));
+      if (missing.length) {
+        pushDiff(out, 'items', `${label}/sku+cover`,
+          [j.sku, j.cover, j.grade].filter(Boolean).join(' '), [m.sku, m.cover, m.grade].filter(Boolean).join(' '));
+      }
+      if (!softTextEqual(j.description, m.description)) {
+        pushDiff(out, 'items', `${label}/description`, j.description, m.description);
+      }
+      continue;
+    }
+
     // Treat sku + cover + grade as one bag of tokens per side. JSON may bake
     // the grade into the SKU string (e.g. "9B14 DP 22389 MUSHROOM") while RV
     // breaks it out as a separate column. Compare as multisets so ordering
@@ -524,7 +567,7 @@ function linkSetLines(jsonInvoice, mssqlRecord, link) {
   }
 }
 
-function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
+function diffPackages(jsonPackages, mssqlPackages, out, link = null, mssqlItems = []) {
   const a = (jsonPackages || []).filter((p) => !p.bookedAsSingleLine);
   const b = (mssqlPackages || []).filter((p) => !(link && link.matchedRvPackages.has(p.key)));
   if (!a.length && !b.length) return;
@@ -558,6 +601,22 @@ function diffPackages(jsonPackages, mssqlPackages, out, link = null) {
 
     const label = pkg.label || pkg.key || 'package';
     if (best < 0) {
+      // RV does not always book a package as one: the same lines can be on
+      // the sale as ordinary items, each carrying its share of the price
+      // (two chairs at 699.00 for a 1,398.00 package). If every line of the
+      // Ticket's package is there, the package is audited on what they add
+      // up to.
+      const want = [...ids(pkg)];
+      const lines = want.map((id) => (mssqlItems || [])
+        .find((m) => normalizeItemId(m.itemId) === id && !m.packageKey));
+      if (want.length && lines.every(Boolean)) {
+        const sum = lines.reduce((a, m) => a + (Number(m.extendedPrice) || 0), 0);
+        if (!eqNum(sum, pkg.price)) {
+          pushDiff(out, 'packages', `${label}/price`, pkg.price, Math.round(sum * 100) / 100);
+          pkg.hasDiff = true;
+        }
+        continue;
+      }
       pushDiff(out, 'packages', `missing-in-mssql:${label}`, pkg, null);
       pkg.hasDiff = true;
       continue;
@@ -633,7 +692,7 @@ function compare(jsonInvoice, mssqlRecord) {
   diffTotals(jsonInvoice.totals, mssqlRecord.totals, out, { noTaxSale: jsonInvoice.noTaxSale });
   const pkgLink = linkTicketPackageLines(jsonInvoice, mssqlRecord, out);
   linkSetLines(jsonInvoice, mssqlRecord, pkgLink);
-  diffPackages(jsonInvoice.packages, mssqlRecord.packages, out, pkgLink);
+  diffPackages(jsonInvoice.packages, mssqlRecord.packages, out, pkgLink, mssqlRecord.items);
   diffItems(jsonInvoice.items, mssqlRecord.items, out, pkgLink);
   return {
     matched: true,

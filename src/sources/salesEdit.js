@@ -58,7 +58,7 @@ function rank(file, customerName) {
   return 3;
 }
 
-async function searchSalesEditPdfs(customerName, { limit = 10 } = {}) {
+async function searchSalesEditPdfs(customerName, { limit = 10, since = '' } = {}) {
   const drive = getDriveClient();
   const safe = driveEscape(String(customerName || '').trim());
   if (!safe) return [];
@@ -77,12 +77,22 @@ async function searchSalesEditPdfs(customerName, { limit = 10 } = {}) {
     pageSize: limit,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    // The sales live on shared drives. Without this the search covers only
+    // the signed-in account's own files and never finds one of them.
+    corpora: 'allDrives',
   });
 
-  const files = res.data.files || [];
+  // Only a file that is this customer's own SALES EDIT (or a reprint of it),
+  // and one Drive will actually hand over ahead of one it won't.
+  const earliest = /^\d{4}-\d{2}-\d{2}$/.test(String(since || ''))
+    ? new Date(Date.parse(`${since}T00:00:00Z`) - 86400000).toISOString()
+    : '';
+  const files = (res.data.files || []).filter((f) => rank(f, customerName) === 0
+    && (!earliest || String(f.createdTime) >= earliest));
+  const blocked = (f) => (f.capabilities && f.capabilities.canDownload === false ? 1 : 0);
   return files
-    .map((f, i) => ({ f, r: rank(f, customerName), i }))
-    .sort((a, b) => (a.r - b.r) || (a.i - b.i))
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => (blocked(a.f) - blocked(b.f)) || (a.i - b.i))
     .map((x) => x.f);
 }
 
@@ -318,11 +328,17 @@ function surnameOnlyCandidates(items, customerName) {
 
 // Candidates for a customer, best match first. Falls back to the surname when
 // nothing matches outright and the surname points at exactly one sale.
-function pickCandidates(items, customerName) {
+//
+// `mode` splits the two halves apart: "strong" is a real name match only,
+// "weak" is only the fallbacks. The lookup runs every location on strong
+// before it lets any location answer on weak — otherwise a sale that has
+// simply been moved is "found" as the one other customer with that surname.
+function pickCandidates(items, customerName, mode = 'any') {
   const matched = items
     .filter((f) => nameMatchScore(f.name, customerName) > 0)
     .sort(byNameThenRecency(customerName));
-  if (matched.length) return matched;
+  if (mode === 'strong') return matched;
+  if (matched.length) return mode === 'weak' ? [] : matched;
 
   const fallback = surnameOnlyCandidates(items, customerName);
   if (fallback.length) {
@@ -426,21 +442,64 @@ async function findInDayFolder(customerName, store, date, opts = {}) {
   }
   if (!folder) return null;
 
-  const kids = await listChildren(folder.id, opts);
+  return salesInFolder(folder, customerName, opts, { dayFolder: folder.name });
+}
 
-  const loose = pickCandidates(salesEditPdfs(kids, customerName), customerName)[0];
-  if (loose) return { ...loose, folderName: folder.name, dayFolder: folder.name };
+// The customer's sale(s) inside one container folder — a day folder, a
+// store's "Issues" folder — which holds one subfolder per sale plus the odd
+// loose PDF. Returns the first with any others attached as `alternates`.
+//
+// A customer can have more than one sale folder in the same place ("1315600
+// MARK OTT" and "1315610 MARK OTT"); the rest ride along so the audit can
+// pick the one that is actually this ticket's.
+async function salesInFolder(container, customerName, opts = {}, tag = {}) {
+  const kids = await listChildren(container.id, opts);
+  const mode = opts.match || 'any';
 
-  // A customer can have more than one sale folder on the day ("1315600 MARK
-  // OTT" and "1315610 MARK OTT"). The first is returned as before; the rest
-  // ride along so the audit can pick the one that is actually this ticket's.
+  const loose = pickCandidates(salesEditPdfs(kids, customerName), customerName, mode)[0];
+  if (loose) return { ...loose, folderName: container.name, ...tag };
+
+  return firstWithAlternates(pickCandidates(kids.filter(isDir), customerName, mode), customerName, opts, tag);
+}
+
+async function firstWithAlternates(saleFolders, customerName, opts, tag = {}) {
   const hits = [];
-  for (const sub of pickCandidates(kids.filter(isDir), customerName)) {
+  for (const sub of saleFolders) {
     const hit = salesEditPdfs(await listChildren(sub.id, opts), customerName)[0];
-    if (hit) hits.push({ ...hit, folderId: sub.id, folderName: sub.name, dayFolder: folder.name });
+    if (hit) hits.push({ ...hit, folderId: sub.id, folderName: sub.name, ...tag });
     if (hits.length >= MAX_SALE_CANDIDATES) break;
   }
   return hits.length ? { ...hits[0], alternates: hits.slice(1) } : null;
+}
+
+// A sale that is not ready to close — waiting on an e-signature, a driver's
+// licence, an approval — is parked in the store's "Issues" folder ("Audit
+// Arden / Arden Issues / 1315490 JULIO LOPEZ - HOLD FOR DL") instead of
+// moving on with its day.
+async function findInIssuesFolders(customerName, store, opts = {}) {
+  const rootId = STORE_ROOTS[store];
+  if (!rootId) return null;
+  const parked = (await listChildren(rootId, opts)).filter((f) => isDir(f) && /\bISSUES?\b/i.test(f.name));
+  for (const folder of parked) {
+    const hit = await salesInFolder(folder, customerName, opts, { parkedIn: folder.name });
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Or it is carried forward: a sale written on the 25th and still open is
+// moved into the folder of the day it is finally dealt with ("W NOV 27 /
+// 2329820 JAMES WYKLE"). Look through the days that follow the ticket's.
+const CARRIED_FORWARD_DAYS = 7;
+async function findInLaterDayFolders(customerName, store, date, opts = {}) {
+  const start = Date.parse(`${date}T12:00:00Z`);
+  if (Number.isNaN(start)) return null;
+  for (let n = 1; n <= CARRIED_FORWARD_DAYS; n++) {
+    const day = new Date(start + n * 86400000).toISOString().slice(0, 10);
+    const hit = await findInDayFolder(customerName, store, day, opts);
+    if (hit) return { ...hit, carriedTo: day };
+  }
+  return null;
 }
 
 // Sales that have moved out of their day folder into one of the flat roots.
@@ -454,13 +513,7 @@ async function findViaFolder(customerName, opts = {}) {
       console.warn(`sales-edit: could not list root ${root}: ${e.message}`);
     }
   }
-  const hits = [];
-  for (const folder of pickCandidates(folders, customerName)) {
-    const hit = salesEditPdfs(await listChildren(folder.id, opts), customerName)[0];
-    if (hit) hits.push({ ...hit, folderId: folder.id, folderName: folder.name });
-    if (hits.length >= MAX_SALE_CANDIDATES) break;
-  }
-  return hits.length ? { ...hits[0], alternates: hits.slice(1) } : null;
+  return firstWithAlternates(pickCandidates(folders, customerName, opts.match || 'any'), customerName, opts);
 }
 
 // Pull the RV sale number out of a folder name like "1309070 JEFF GIUNTA" or
@@ -488,31 +541,61 @@ async function findSalesEditPdf(customerName, { store = '', date = '', invoiceId
 
   const stores = STORE_ROOTS[store] ? [store] : Object.keys(STORE_ROOTS);
 
+  // Every place a sale can be, nearest first.
   const walk = async (opts) => {
-    // 1. The store's day folder — where a sale lives while it is current.
     if (date) {
+      // 1. The store's day folder — where a sale lives while it is current.
       for (const st of stores) {
         const hit = await findInDayFolder(customerName, st, date, opts);
         if (hit) return hit;
       }
     }
-    // 2. The flat roots, for sales whose day has been closed out.
-    return findViaFolder(customerName, opts);
+    // Not there, so it has been moved — and a returning customer may have
+    // another sale in any of these places. Collect what each one holds and
+    // let the audit choose the sale that matches the ticket.
+    const found = [];
+    const add = (hit) => {
+      if (!hit) return;
+      const { alternates = [], ...first } = hit;
+      found.push(first, ...alternates);
+    };
+    // A weak match (surname only) is not trusted across a week of other
+    // days' sales, so steps 2 and 3 take real name matches only.
+    if (opts.match !== 'weak') {
+      // 2. The store's Issues folder, for a sale held back from closing.
+      for (const st of stores) add(await findInIssuesFolders(customerName, st, opts).catch(() => null));
+      // 3. A later day's folder, for a sale carried forward.
+      if (date) {
+        for (const st of stores) add(await findInLaterDayFolders(customerName, st, date, opts).catch(() => null));
+      }
+    }
+    // 4. The flat roots, for sales whose day has been closed out.
+    add(await findViaFolder(customerName, opts));
+
+    if (!found.length) return null;
+    const [first, ...rest] = found;
+    return { ...first, alternates: rest.slice(0, MAX_SALE_CANDIDATES + 1) };
   };
 
-  const cached = await walk({});
+  // A real name match, anywhere, comes first.
+  const cached = await walk({ match: 'strong' });
   if (cached) return cached;
 
   // Nothing found. Before reporting the sale as missing, repeat the walk
   // against Drive rather than the cache — a sale filed in the last minute
   // would otherwise be invisible for no good reason.
-  const live = await walk({ fresh: true });
+  const live = await walk({ match: 'strong', fresh: true });
   if (live) return live;
 
-  // 3. Last resort: a name search. Reaches sales moved off to the archive
-  //    drive, at the cost of being subject to the index lag described above.
-  const files = await searchSalesEditPdfs(customerName, { limit: 10 });
-  return files[0] || null;
+  // Then a name search across every drive, which reaches sales moved
+  // somewhere the walk doesn't know about, the archive drive included.
+  // A file from before the ticket was written is an earlier sale to the same
+  // person, not this one.
+  const files = await searchSalesEditPdfs(customerName, { limit: 10, since: date }).catch(() => []);
+  if (files[0]) return { ...files[0], folderId: (files[0].parents || [])[0] };
+
+  // Only now the weak matches: a surname on its own, or one letter out.
+  return walk({ match: 'weak' });
 }
 
 async function downloadPdf(fileId) {

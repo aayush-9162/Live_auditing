@@ -386,7 +386,13 @@ function readMainLine(line, item, anchors) {
   if (qtyCells.some((c) => /^PACKAGE$/i.test(c.str))) item.__is_package = true;
   item.sale_qty = qtyNums.length ? qtyNums[0] : 1;
 
-  const uomIdx = rest.findIndex((c) => UOM_RE.test(c.str));
+  // The unit of measure is the "EA" that follows the unit price. A product
+  // code can contain the same letters — "FLEX 1043 64PH PR LV 946 72" has a
+  // "PR" in it — so take the one sitting right after a money figure, and only
+  // fall back to the first match when the price is missing.
+  const isMoney = (c) => c && /^-?[\d,]*\.\d{2}-?$/.test(String(c.str).trim());
+  let uomIdx = rest.findIndex((c, i) => UOM_RE.test(c.str) && isMoney(rest[i - 1]));
+  if (uomIdx < 0) uomIdx = rest.findIndex((c) => UOM_RE.test(c.str));
   let descCells;
   let tailCells;
   if (uomIdx >= 0) {

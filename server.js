@@ -10,7 +10,7 @@ const {
 } = require('./src/sources/salesEdit');
 const { extractLines } = require('./src/parse/pdfLayout');
 const { parseSalesEdit } = require('./src/parse/salesEdit');
-const { normalizeInvoice } = require('./src/normalize/fromJson');
+const { normalizeInvoice, normalizeDate } = require('./src/normalize/fromJson');
 const { normalizeMssqlRows } = require('./src/normalize/fromMssql');
 const { toFirstLast, namesLooseMatch } = require('./src/match/name');
 const { addressLooseMatch } = require('./src/match/address');
@@ -92,12 +92,22 @@ async function findReturnsFor(rec, sameDay, date, folder) {
 // between several sales on file for the same customer. A sale ticket's sale
 // has the ticket's total; a return ticket's is either the sale it names or a
 // sale carrying return (negative) lines.
-function saleFitsTicket(sale, jsonNorm) {
+function saleFitsTicket(sale, jsonNorm, originalRec = null) {
   const header = (sale && sale.header) || {};
   if (jsonNorm.isReturn) {
+    if ((sale.items || []).some((row) => Number(row.sale_qty) < 0)) return true;
+    // The ticket being returned from is a firmer link than the sale number
+    // typed on the return, which can be left over from an earlier sale: the
+    // right sale is the one holding most of what that ticket sold.
+    const bare = (id) => String(id || '').trim().replace(/^\*PKG/i, '').replace(/^0+(?=\d)/, '').toLowerCase();
+    const sold = [...new Set(((originalRec && originalRec.form_json && originalRec.form_json.items) || [])
+      .map((it) => bare(it.itemId)).filter((id) => id && !id.startsWith('*')))];
+    if (sold.length) {
+      const onSale = new Set((sale.items || []).map((row) => bare(row.sale_item)));
+      return sold.filter((id) => onSale.has(id)).length >= sold.length / 2;
+    }
     const wanted = String((jsonNorm.returnInfo && jsonNorm.returnInfo.rvNumber) || '').trim();
-    if (wanted && wanted === String(header.SalesNo || '').trim()) return true;
-    return (sale.items || []).some((row) => Number(row.sale_qty) < 0);
+    return Boolean(wanted) && wanted === String(header.SalesNo || '').trim();
   }
   return Math.abs((Number(header.SaleTotalAmt) || 0) - (Number(jsonNorm.totals.total) || 0)) < 0.01;
 }
@@ -452,13 +462,23 @@ app.get('/api/audit', async (req, res) => {
     // comes back as the most recent one for both tickets. When that one is
     // plainly not this ticket's sale and there are others, take the one that
     // is.
-    if ((file.alternates || []).length && !saleFitsTicket(sale, jsonNorm)) {
+    // A return ticket's original sale ticket, wanted both for choosing the
+    // right RV sale and for the return check itself.
+    const originalRec = jsonNorm.isReturn
+      ? await findOriginalInvoice(jsonNorm.returnInfo.originalInvoiceSlug, archive)
+      : null;
+
+    if ((file.alternates || []).length && !saleFitsTicket(sale, jsonNorm, originalRec)) {
+      const others = [];
       for (const alt of file.alternates) {
-        try {
-          const other = await loadSalesEdit(alt);
-          if (saleFitsTicket(other, jsonNorm)) { file = alt; sale = other; break; }
-        } catch (e) { /* unreadable alternate — keep what we have */ }
+        try { others.push({ file: alt, sale: await loadSalesEdit(alt) }); } catch (e) { /* unreadable — skip */ }
       }
+      // The one with the ticket's total; failing that, the one RV dated the
+      // same day as the ticket (unless the first already is).
+      const sameDay = (s) => normalizeDate(s.header.SaleDate) === jsonNorm.dates.order;
+      const better = others.find((o) => saleFitsTicket(o.sale, jsonNorm, originalRec))
+        || (!sameDay(sale) ? others.find((o) => sameDay(o.sale)) : null);
+      if (better) { file = better.file; sale = better.sale; }
     }
 
     const header = sale.header;
@@ -547,7 +567,6 @@ app.get('/api/audit', async (req, res) => {
     // money, not line-for-line against the whole sale.
     let result;
     if (jsonNorm.isReturn) {
-      const originalRec = await findOriginalInvoice(jsonNorm.returnInfo.originalInvoiceSlug, archive);
       result = compareReturn(jsonNorm, mssqlNorm, {
         original: originalRec ? normalizeInvoice(originalRec) : null,
         originalLines: (originalRec && originalRec.form_json && originalRec.form_json.items) || [],

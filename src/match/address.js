@@ -72,10 +72,12 @@ const DIRECTIONALS = {
   southwest: 'sw', sw: 'sw',
 };
 
+// "Apartment 342", "Apt 342", "Ap#342", "Unit 342" and "#342" all name the
+// same door, so they reduce to the bare "#".
 const UNIT_TYPES = {
-  apartment: 'apt', apt: 'apt',
+  apartment: '#',   apt: '#',   ap: '#',
   suite: 'ste',     ste: 'ste',
-  unit: 'unit',
+  unit: '#',
   building: 'bldg', bldg: 'bldg',
   floor: 'fl',      fl: 'fl',
   room: 'rm',       rm: 'rm',
@@ -95,7 +97,7 @@ function canonicalTokens(input, { directionals = true } = {}) {
     if (directionals && Object.hasOwn(DIRECTIONALS, tok)) return DIRECTIONALS[tok];
     if (Object.hasOwn(UNIT_TYPES, tok)) return UNIT_TYPES[tok];
     return tok;
-  });
+  }).filter((tok, i, all) => !(tok === '#' && all[i - 1] === '#'));   // "Apt #5" -> "# 5"
 }
 
 function canonicalAddress(input) {

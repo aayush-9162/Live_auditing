@@ -40,8 +40,29 @@ function canonical(name) {
   return `${split.first} ${split.last}`.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+// A ticket written for a couple — "Patrick And Patricia Donovan", "Rob &
+// Rhonda Briggs" — is one RV customer, filed under one of the two. Returns
+// each person the name stands for, as "first last"; a single name comes back
+// as itself.
+function persons(name) {
+  const c = canonical(name);
+  if (!c) return [];
+  const { first, last } = splitFirstLast(c);
+  const firsts = first.split(/\s+and\s+|\s*&\s*/).map((s) => s.trim()).filter(Boolean);
+  if (firsts.length < 2 || !last) return [c];
+  return firsts.map((f) => `${f} ${last}`);
+}
+
 function namesMatch(a, b) {
-  return canonical(a) === canonical(b) && canonical(a) !== '';
+  const ca = canonical(a);
+  const cb = canonical(b);
+  if (!ca || !cb) return false;
+  if (ca === cb) return true;
+  // Either person on a joint ticket is a match for the one RV has on file.
+  const pa = persons(a);
+  const pb = persons(b);
+  if (pa.length < 2 && pb.length < 2) return false;
+  return pa.some((x) => pb.includes(x));
 }
 
 // Levenshtein edit distance — small but enough for catching typos like
@@ -74,6 +95,13 @@ function namesLooseMatch(a, b) {
   const cb = canonical(b);
   if (!ca || !cb) return false;
   if (ca === cb) return true;
+
+  // A joint ticket matches if either of the two people does.
+  const pa = persons(a);
+  const pb = persons(b);
+  if (pa.length > 1 || pb.length > 1) {
+    return pa.some((x) => pb.some((y) => namesLooseMatch(x, y)));
+  }
 
   const A = ca.includes(',') ? splitLastFirst(ca) : splitFirstLast(ca);
   const B = cb.includes(',') ? splitLastFirst(cb) : splitFirstLast(cb);
